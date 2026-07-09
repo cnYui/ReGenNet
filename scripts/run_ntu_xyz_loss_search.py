@@ -136,6 +136,23 @@ def _built_in_candidates(stage):
                 },
             ),
         ]
+    if stage == "stageA_long_final_grid":
+        candidates = []
+        for long_weight in (0.025, 0.05, 0.075, 0.1):
+            for final_weight in (0.025, 0.05, 0.075, 0.1):
+                candidates.append(
+                    _candidate(
+                        "stageA_lf_l{:03d}_f{:03d}".format(
+                            int(long_weight * 1000), int(final_weight * 1000)
+                        ),
+                        "stageA",
+                        {
+                            "long_loss_weight": long_weight,
+                            "final_frame_loss_weight": final_weight,
+                        },
+                    )
+                )
+        return candidates
     if stage == "stageB":
         base = OrderedDict(ACCEPTED_D_CONFIG)
         base["action_feature_loss_weight"] = 0.0
@@ -459,7 +476,16 @@ def build_arg_parser():
     parser.add_argument(
         "--stage",
         default="baseline",
-        choices=("baseline", "stageA", "stageB", "stageB_from_stageA", "stageD", "stageD_from_stageA", "acceptedD"),
+        choices=(
+            "baseline",
+            "stageA",
+            "stageA_long_final_grid",
+            "stageB",
+            "stageB_from_stageA",
+            "stageD",
+            "stageD_from_stageA",
+            "acceptedD",
+        ),
     )
     parser.add_argument("--config_jsonl", default=None)
     parser.add_argument("--candidate_ids", default=None)
