@@ -391,8 +391,11 @@ def run_search(args):
         _append_jsonl(os.path.join(args.result_root, "candidates.jsonl"), candidate)
 
     baseline_metrics = args.baseline_metrics
-    leaderboard = []
     leaderboard_path = os.path.join(args.result_root, "leaderboard.json")
+    if os.path.exists(leaderboard_path) and not args.reset_leaderboard:
+        leaderboard = _read_json(leaderboard_path)
+    else:
+        leaderboard = []
     for candidate in candidates:
         for seed in seeds:
             run_id = "{}_s{}".format(candidate["config_id"], seed)
@@ -467,6 +470,7 @@ def build_arg_parser():
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--resume_checkpoint", default=None)
     parser.add_argument("--dry_run", action="store_true")
+    parser.add_argument("--reset_leaderboard", action="store_true")
     return parser
 
 

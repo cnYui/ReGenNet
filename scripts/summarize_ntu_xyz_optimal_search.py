@@ -14,6 +14,18 @@ def _read_json(path):
         return json.load(f)
 
 
+def _read_entries(path):
+    if path.endswith(".jsonl"):
+        entries = []
+        with open(path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    entries.append(json.loads(line))
+        return entries
+    return _read_json(path)
+
+
 def _write_json(path, value):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
@@ -39,7 +51,7 @@ def _group(entries):
 
 
 def summarize(args):
-    entries = _read_json(args.leaderboard)
+    entries = _read_entries(args.leaderboard)
     groups = _group(entries)
     rows = []
     for config_id, items in groups.items():
@@ -92,7 +104,7 @@ def build_arg_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--leaderboard",
-        default="results/forecasting/ntu120_label/xyz_loss_optimal/leaderboard_sorted.json",
+        default="results/forecasting/ntu120_label/xyz_loss_optimal/leaderboard.jsonl",
     )
     parser.add_argument(
         "--output_json",
