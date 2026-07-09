@@ -95,6 +95,21 @@ def _build_model(args):
         continuity_loss_weight=args.continuity_loss_weight,
         first_step_loss_weight=args.first_step_loss_weight,
         mae_loss_weight=args.mae_loss_weight,
+        root_loss_weight=args.root_loss_weight,
+        local_pose_loss_weight=args.local_pose_loss_weight,
+        mpjpe_loss_weight=args.mpjpe_loss_weight,
+        short_loss_weight=args.short_loss_weight,
+        mid_loss_weight=args.mid_loss_weight,
+        long_loss_weight=args.long_loss_weight,
+        final_frame_loss_weight=args.final_frame_loss_weight,
+        acceleration_loss_weight=args.acceleration_loss_weight,
+        relative_root_loss_weight=args.relative_root_loss_weight,
+        relative_velocity_loss_weight=args.relative_velocity_loss_weight,
+        key_joint_relation_loss_weight=args.key_joint_relation_loss_weight,
+        contact_loss_weight=args.contact_loss_weight,
+        contact_threshold=args.contact_threshold,
+        action_feature_loss_weight=args.action_feature_loss_weight,
+        action_logit_loss_weight=args.action_logit_loss_weight,
     )
 
 
@@ -137,7 +152,19 @@ def _load_resume(args, model, optimizer, device):
     return step
 
 
-def _train_step(model, converter, batch, args, device):
+def _load_action_classifier(args, device):
+    use_action_loss = float(args.action_feature_loss_weight) > 0.0 or float(args.action_logit_loss_weight) > 0.0
+    if not use_action_loss:
+        return None, None
+    if args.action_classifier_path is None:
+        raise ValueError("启用 action loss 时必须提供 --action_classifier_path")
+    from eval.action_xyz_classifier import load_xyz_action_classifier
+
+    classifier, normalizer, _ = load_xyz_action_classifier(args.action_classifier_path, device=device)
+    return classifier, normalizer
+
+
+def _train_step(model, converter, batch, args, device, action_classifier=None, action_normalizer=None):
     if "obs_xyz" in batch:
         obs_xyz = batch["obs_xyz"].to(device)
         target_xyz = batch["target_xyz"].to(device)
@@ -146,7 +173,13 @@ def _train_step(model, converter, batch, args, device):
             obs_xyz = ntu_rotvec_2p_to_xyz(batch["obs_motion"].to(device), device=device, converter=converter)
             target_xyz = ntu_rotvec_2p_to_xyz(batch["future"].to(device), device=device, converter=converter)
     action = batch["action"].to(device)
-    return model.training_loss(obs_xyz, target_xyz, action)
+    return model.training_loss(
+        obs_xyz,
+        target_xyz,
+        action,
+        action_classifier=action_classifier,
+        action_normalizer=action_normalizer,
+    )
 
 
 def _eval_args(args, checkpoint_path):
@@ -166,6 +199,8 @@ def _eval_args(args, checkpoint_path):
         xyz_cache=args.eval_xyz_cache,
         save_arrays=False,
         save_array_limit=0,
+        action_classifier_path=args.action_classifier_path,
+        semantic_eval=False,
     )
 
 
@@ -189,6 +224,7 @@ def run_training(args):
     model = _build_model(args).to(device)
     converter = Rotation2xyz_x(device=device, dataset="ntu120_2p")
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    action_classifier, action_normalizer = _load_action_classifier(args, device)
     args.num_params = count_parameters(model)
     args.effective_batch_size = int(args.batch_size * max(1, args.grad_accum_steps))
     args.created_at = _utc_now()
@@ -211,7 +247,15 @@ def run_training(args):
             if step >= args.num_steps:
                 break
             model.train()
-            loss = _train_step(model, converter, batch, args, device)
+            loss = _train_step(
+                model,
+                converter,
+                batch,
+                args,
+                device,
+                action_classifier=action_classifier,
+                action_normalizer=action_normalizer,
+            )
             (loss / float(args.grad_accum_steps)).backward()
             recent_losses.append(float(loss.detach().cpu().item()))
             accum_batches += 1
@@ -249,8 +293,12 @@ def run_training(args):
                 summary = _evaluate(args, model, latest_checkpoint, step, device)
                 record["test_xyz_mse"] = summary["model_metrics"]["xyz_mse"]
                 record["test_xyz_mae"] = summary["model_metrics"]["xyz_mae"]
+                record["test_mpjpe"] = summary["model_metrics"]["mpjpe"]
+                record["test_long_xyz_mse"] = summary["model_metrics"]["long_xyz_mse"]
+                record["test_final_frame_error"] = summary["model_metrics"]["final_frame_error"]
                 record["copy_last_xyz_mse"] = summary["copy_last_metrics"]["xyz_mse"]
                 record["copy_last_xyz_mae"] = summary["copy_last_metrics"]["xyz_mae"]
+                record["copy_last_mpjpe"] = summary["copy_last_metrics"]["mpjpe"]
                 record["beats_copy_last"] = summary["beats_copy_last"]
 
             _append_train_log(args, record)
@@ -282,9 +330,25 @@ def build_arg_parser():
     parser.add_argument("--dim_feedforward", type=int, default=1024)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--velocity_loss_weight", type=float, default=0.2)
-    parser.add_argument("--continuity_loss_weight", type=float, default=1.0)
-    parser.add_argument("--first_step_loss_weight", type=float, default=0.1)
-    parser.add_argument("--mae_loss_weight", type=float, default=0.0)
+    parser.add_argument("--continuity_loss_weight", type=float, default=0.0)
+    parser.add_argument("--first_step_loss_weight", type=float, default=0.0)
+    parser.add_argument("--mae_loss_weight", type=float, default=0.1)
+    parser.add_argument("--root_loss_weight", type=float, default=1.0)
+    parser.add_argument("--local_pose_loss_weight", type=float, default=1.0)
+    parser.add_argument("--mpjpe_loss_weight", type=float, default=0.0)
+    parser.add_argument("--short_loss_weight", type=float, default=0.0)
+    parser.add_argument("--mid_loss_weight", type=float, default=0.0)
+    parser.add_argument("--long_loss_weight", type=float, default=0.2)
+    parser.add_argument("--final_frame_loss_weight", type=float, default=0.2)
+    parser.add_argument("--acceleration_loss_weight", type=float, default=0.1)
+    parser.add_argument("--relative_root_loss_weight", type=float, default=0.2)
+    parser.add_argument("--relative_velocity_loss_weight", type=float, default=0.1)
+    parser.add_argument("--key_joint_relation_loss_weight", type=float, default=0.0)
+    parser.add_argument("--contact_loss_weight", type=float, default=0.0)
+    parser.add_argument("--contact_threshold", type=float, default=0.15)
+    parser.add_argument("--action_feature_loss_weight", type=float, default=0.0)
+    parser.add_argument("--action_logit_loss_weight", type=float, default=0.0)
+    parser.add_argument("--action_classifier_path", default=None)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--grad_accum_steps", type=int, default=1)

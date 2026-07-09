@@ -4,6 +4,7 @@ import os
 from collections import OrderedDict
 from datetime import datetime
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
@@ -92,12 +93,196 @@ def _finalize(sums, num_samples):
     return OrderedDict((key, sums[key] / float(num_samples)) for key in NTU_XYZ_METRIC_KEYS)
 
 
+def _load_semantic_evaluator(args, device):
+    if not bool(getattr(args, "semantic_eval", False)):
+        return None
+    if getattr(args, "action_classifier_path", None) is None:
+        raise ValueError("--semantic_eval 必须提供 --action_classifier_path")
+    from eval.action_xyz_classifier import load_xyz_action_classifier
+
+    classifier, normalizer, state = load_xyz_action_classifier(args.action_classifier_path, device=device)
+    return {
+        "classifier": classifier,
+        "normalizer": normalizer,
+        "state": state,
+        "logits": {"real": [], "model": [], "copy_last": []},
+        "features": {"real": [], "model": [], "copy_last": []},
+        "labels": [],
+    }
+
+
+def _append_semantic_batch(semantic, target_xyz, pred_xyz, copy_xyz, labels):
+    if semantic is None:
+        return
+    from eval.action_xyz_classifier import extract_xyz_action_features
+
+    classifier = semantic["classifier"]
+    normalizer = semantic["normalizer"]
+    for name, value in (("real", target_xyz), ("model", pred_xyz), ("copy_last", copy_xyz)):
+        logits, features = extract_xyz_action_features(classifier, value, normalizer)
+        semantic["logits"][name].append(logits.detach().cpu())
+        semantic["features"][name].append(features.detach().cpu())
+    semantic["labels"].append(labels.detach().view(-1).cpu())
+
+
+def _classification_metrics(logits, labels, num_actions):
+    topk = min(5, int(logits.shape[1]))
+    _, top_labels = torch.topk(logits, k=topk, dim=1)
+    preds = top_labels[:, 0]
+    total = int(labels.shape[0])
+    class_count = [0 for _ in range(num_actions)]
+    class_correct = [0 for _ in range(num_actions)]
+    for target, pred in zip(labels.tolist(), preds.tolist()):
+        target = int(target)
+        pred = int(pred)
+        class_count[target] += 1
+        if pred == target:
+            class_correct[target] += 1
+    per_class_acc = []
+    valid_acc = []
+    for idx in range(num_actions):
+        if class_count[idx] > 0:
+            acc = float(class_correct[idx]) / float(class_count[idx])
+            per_class_acc.append(acc)
+            valid_acc.append(acc)
+        else:
+            per_class_acc.append(None)
+    return OrderedDict(
+        [
+            ("top1_acc", float((preds == labels).float().mean().item())),
+            ("top5_acc", float((top_labels == labels.unsqueeze(1)).any(dim=1).float().mean().item())),
+            ("balanced_acc", sum(valid_acc) / float(len(valid_acc)) if valid_acc else 0.0),
+            ("per_class_acc", per_class_acc),
+            ("per_class_count", class_count),
+            ("predicted_label_counts", [int((preds == idx).sum().item()) for idx in range(num_actions)]),
+            ("num_samples", total),
+        ]
+    )
+
+
+def _fid(features_a, features_b):
+    from scipy import linalg
+
+    a = np.asarray(features_a, dtype=np.float64)
+    b = np.asarray(features_b, dtype=np.float64)
+    if a.ndim != 2 or b.ndim != 2:
+        raise ValueError("FID features 必须是二维矩阵")
+    if a.shape[0] < 2 or b.shape[0] < 2:
+        return None
+    mu_a = a.mean(axis=0)
+    mu_b = b.mean(axis=0)
+    sigma_a = np.cov(a, rowvar=False)
+    sigma_b = np.cov(b, rowvar=False)
+    eps = 1e-6
+    sigma_a = sigma_a + np.eye(sigma_a.shape[0]) * eps
+    sigma_b = sigma_b + np.eye(sigma_b.shape[0]) * eps
+    covmean = linalg.sqrtm(sigma_a.dot(sigma_b))
+    if np.iscomplexobj(covmean):
+        covmean = covmean.real
+    diff = mu_a - mu_b
+    value = diff.dot(diff) + np.trace(sigma_a + sigma_b - 2.0 * covmean)
+    return float(np.real(value))
+
+
+def _diversity(features, num_pairs, seed):
+    features = np.asarray(features, dtype=np.float64)
+    if features.shape[0] < 2:
+        return 0.0
+    rng = np.random.RandomState(int(seed))
+    pairs = int(min(max(1, int(num_pairs)), features.shape[0] * (features.shape[0] - 1)))
+    distances = []
+    for _ in range(pairs):
+        i = rng.randint(0, features.shape[0])
+        j = rng.randint(0, features.shape[0] - 1)
+        if j >= i:
+            j += 1
+        distances.append(np.linalg.norm(features[i] - features[j]))
+    return float(np.mean(distances))
+
+
+def _class_wise_fid(real_features, other_features, labels, num_actions):
+    values = []
+    labels = np.asarray(labels, dtype=np.int64)
+    for idx in range(num_actions):
+        mask = labels == idx
+        count = int(mask.sum())
+        if count >= 2:
+            values.append(_fid(real_features[mask], other_features[mask]))
+        else:
+            values.append(None)
+    valid = [item for item in values if item is not None]
+    return OrderedDict(
+        [
+            ("per_class_fid", values),
+            ("mean_class_fid", float(np.mean(valid)) if valid else None),
+            ("valid_class_count", len(valid)),
+        ]
+    )
+
+
+def _semantic_summary(args, semantic):
+    if semantic is None:
+        return None
+    labels = torch.cat(semantic["labels"], dim=0).long()
+    logits = {key: torch.cat(value, dim=0) for key, value in semantic["logits"].items()}
+    features = {key: torch.cat(value, dim=0).numpy() for key, value in semantic["features"].items()}
+    labels_np = labels.numpy()
+    num_actions = int(logits["real"].shape[1])
+    return OrderedDict(
+        [
+            ("action_classifier_path", args.action_classifier_path),
+            ("classifier_checkpoint_step", semantic["state"].get("step")),
+            ("real_future", _classification_metrics(logits["real"], labels, num_actions)),
+            ("model_future", _classification_metrics(logits["model"], labels, num_actions)),
+            ("copy_last_future", _classification_metrics(logits["copy_last"], labels, num_actions)),
+            (
+                "fid",
+                OrderedDict(
+                    [
+                        ("model_vs_real", _fid(features["real"], features["model"])),
+                        ("copy_last_vs_real", _fid(features["real"], features["copy_last"])),
+                    ]
+                ),
+            ),
+            (
+                "diversity",
+                OrderedDict(
+                    [
+                        (
+                            "real",
+                            _diversity(features["real"], getattr(args, "diversity_pairs", 1000), getattr(args, "seed", 0)),
+                        ),
+                        (
+                            "model",
+                            _diversity(features["model"], getattr(args, "diversity_pairs", 1000), getattr(args, "seed", 0)),
+                        ),
+                        (
+                            "copy_last",
+                            _diversity(features["copy_last"], getattr(args, "diversity_pairs", 1000), getattr(args, "seed", 0)),
+                        ),
+                    ]
+                ),
+            ),
+            (
+                "class_wise_fid",
+                OrderedDict(
+                    [
+                        ("model_vs_real", _class_wise_fid(features["real"], features["model"], labels_np, num_actions)),
+                        ("copy_last_vs_real", _class_wise_fid(features["real"], features["copy_last"], labels_np, num_actions)),
+                    ]
+                ),
+            ),
+        ]
+    )
+
+
 def evaluate_ntu_label_xyz(args, model=None, checkpoint_state=None, device=None):
     if device is None:
         device = _device()
     dataset = _build_dataset(args)
     loader = _build_loader(args, dataset)
     converter = Rotation2xyz_x(device=device, dataset="ntu120_2p")
+    semantic = _load_semantic_evaluator(args, device)
 
     model_sums = _empty_sums()
     copy_sums = _empty_sums()
@@ -125,6 +310,7 @@ def evaluate_ntu_label_xyz(args, model=None, checkpoint_state=None, device=None)
             batch_size = int(obs_xyz.shape[0])
             _add_metrics(model_sums, compute_ntu_xyz_metrics(pred_xyz, target_xyz, obs_xyz), batch_size)
             _add_metrics(copy_sums, compute_ntu_xyz_metrics(copy_xyz, target_xyz, obs_xyz), batch_size)
+            _append_semantic_batch(semantic, target_xyz, pred_xyz, copy_xyz, action)
             num_samples += batch_size
 
             if args.save_arrays and len(saved["meta"]) < int(args.save_array_limit):
@@ -161,6 +347,9 @@ def evaluate_ntu_label_xyz(args, model=None, checkpoint_state=None, device=None)
         "xyz_mae": model_metrics["xyz_mae"] <= copy_metrics["xyz_mae"],
         "mpjpe": model_metrics["mpjpe"] < copy_metrics["mpjpe"],
     }
+    semantic_metrics = _semantic_summary(args, semantic)
+    if semantic_metrics is not None:
+        summary["semantic_metrics"] = semantic_metrics
     summary["checkpoint"] = args.checkpoint
     summary["checkpoint_step"] = None if checkpoint_state is None else checkpoint_state.get("step")
     summary["created_at"] = _utc_now()
@@ -202,6 +391,9 @@ def build_arg_parser():
     parser.add_argument("--save_dir", default="results/forecasting/ntu120_label/xyz_eval")
     parser.add_argument("--save_arrays", action="store_true")
     parser.add_argument("--save_array_limit", type=int, default=8)
+    parser.add_argument("--semantic_eval", action="store_true")
+    parser.add_argument("--action_classifier_path", default=None)
+    parser.add_argument("--diversity_pairs", type=int, default=1000)
     return parser
 
 
