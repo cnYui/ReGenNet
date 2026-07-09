@@ -208,6 +208,24 @@ def _built_in_candidates(stage):
                     )
                 )
         return candidates
+    if stage == "stageB_lite_from_stageA_best":
+        candidates = []
+        for key_weight, contact_weight in ((0.0, 0.01), (0.01, 0.0), (0.01, 0.01), (0.025, 0.01), (0.01, 0.025)):
+            candidates.append(
+                _candidate(
+                    "stageB_lite_l050_f075_key{:03d}_contact{:03d}".format(
+                        int(key_weight * 1000), int(contact_weight * 1000)
+                    ),
+                    "stageB",
+                    {
+                        "long_loss_weight": 0.05,
+                        "final_frame_loss_weight": 0.075,
+                        "key_joint_relation_loss_weight": key_weight,
+                        "contact_loss_weight": contact_weight,
+                    },
+                )
+            )
+        return candidates
     if stage == "stageD":
         candidates = []
         for weight in (0.0, 0.005, 0.01, 0.02, 0.05):
@@ -482,6 +500,7 @@ def build_arg_parser():
             "stageA_long_final_grid",
             "stageB",
             "stageB_from_stageA",
+            "stageB_lite_from_stageA_best",
             "stageD",
             "stageD_from_stageA",
             "acceptedD",
