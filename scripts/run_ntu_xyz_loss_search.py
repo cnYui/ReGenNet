@@ -200,6 +200,19 @@ def _built_in_candidates(stage):
                 _candidate("stageD_feature_{:03d}".format(int(weight * 1000)), "stageD", updates)
             )
         return candidates
+    if stage == "stageD_from_stageA":
+        candidates = []
+        for weight in (0.0, 0.005, 0.01, 0.02, 0.05):
+            updates = {
+                "long_loss_weight": 0.05,
+                "final_frame_loss_weight": 0.05,
+                "action_feature_loss_weight": weight,
+                "action_logit_loss_weight": 0.0,
+            }
+            candidates.append(
+                _candidate("stageD_from_A_feature_{:03d}".format(int(weight * 1000)), "stageD", updates)
+            )
+        return candidates
     if stage == "acceptedD":
         return [_candidate("acceptedD_current", "acceptedD", ACCEPTED_D_CONFIG)]
     raise ValueError("未知 stage: {}".format(stage))
@@ -446,7 +459,7 @@ def build_arg_parser():
     parser.add_argument(
         "--stage",
         default="baseline",
-        choices=("baseline", "stageA", "stageB", "stageB_from_stageA", "stageD", "acceptedD"),
+        choices=("baseline", "stageA", "stageB", "stageB_from_stageA", "stageD", "stageD_from_stageA", "acceptedD"),
     )
     parser.add_argument("--config_jsonl", default=None)
     parser.add_argument("--candidate_ids", default=None)
