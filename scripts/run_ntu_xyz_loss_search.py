@@ -154,6 +154,43 @@ def _built_in_candidates(stage):
                     )
                 )
         return candidates
+    if stage == "stageB_from_stageA":
+        stage_a_bases = [
+            (
+                "long_final_005",
+                {"long_loss_weight": 0.05, "final_frame_loss_weight": 0.05},
+            ),
+            (
+                "compact_v1",
+                {
+                    "mae_loss_weight": 0.05,
+                    "root_loss_weight": 0.25,
+                    "local_pose_loss_weight": 0.25,
+                    "long_loss_weight": 0.05,
+                    "final_frame_loss_weight": 0.05,
+                    "acceleration_loss_weight": 0.025,
+                    "relative_root_loss_weight": 0.025,
+                    "relative_velocity_loss_weight": 0.025,
+                },
+            ),
+        ]
+        key_contact_pairs = ((0.025, 0.025), (0.05, 0.05), (0.05, 0.1), (0.1, 0.05))
+        candidates = []
+        for base_name, base_updates in stage_a_bases:
+            for key_weight, contact_weight in key_contact_pairs:
+                updates = OrderedDict(base_updates)
+                updates["key_joint_relation_loss_weight"] = key_weight
+                updates["contact_loss_weight"] = contact_weight
+                candidates.append(
+                    _candidate(
+                        "stageB_{}_key{:03d}_contact{:03d}".format(
+                            base_name, int(key_weight * 1000), int(contact_weight * 1000)
+                        ),
+                        "stageB",
+                        updates,
+                    )
+                )
+        return candidates
     if stage == "stageD":
         candidates = []
         for weight in (0.0, 0.005, 0.01, 0.02, 0.05):
@@ -403,7 +440,11 @@ def run_search(args):
 
 def build_arg_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--stage", default="baseline", choices=("baseline", "stageA", "stageB", "stageD", "acceptedD"))
+    parser.add_argument(
+        "--stage",
+        default="baseline",
+        choices=("baseline", "stageA", "stageB", "stageB_from_stageA", "stageD", "acceptedD"),
+    )
     parser.add_argument("--config_jsonl", default=None)
     parser.add_argument("--candidate_ids", default=None)
     parser.add_argument("--max_candidates", type=int, default=-1)
