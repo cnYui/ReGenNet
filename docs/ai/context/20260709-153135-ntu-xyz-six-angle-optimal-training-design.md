@@ -87,9 +87,11 @@ results/forecasting/ntu120_label/xyz_cache_len60_o20_p40_opt_split/split_summary
 ```text
 1. 以 action label 分层。
 2. 固定 seed。
-3. 默认 val_ratio = 0.15 或 0.20。
-4. 少样本类别至少保留 1 条到 train；如果 val 中缺少某类，summary 标注。
-5. 不改原始 full train/test cache。
+3. 固定默认 val_ratio = 0.15，即 train_opt ≈ 85%，val_opt ≈ 15%。
+4. 当前 train_full = 1956，按 15% 估算 train_opt ≈ 1662，val_opt ≈ 294。
+5. 少样本类别至少保留 1 条到 train；如果 val 中缺少某类，summary 标注。
+6. 20% validation 只作为敏感性复核，不作为默认搜索比例。
+7. 不改原始 full train/test cache。
 ```
 
 验收：
@@ -264,6 +266,16 @@ best_checkpoint.txt
 
 ```text
 train_full -> train_opt + val_opt
+```
+
+固定比例：
+
+```text
+val_ratio = 0.15
+train_opt = 约 85%
+val_opt = 约 15%
+split_seed = 0
+stratified_by = action label
 ```
 
 必须完成：
