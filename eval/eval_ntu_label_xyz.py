@@ -379,7 +379,7 @@ def build_arg_parser():
     parser.add_argument("--mode", default="checkpoint", choices=("checkpoint", "copy_last"))
     parser.add_argument("--data_path", default="dataset/ntu120/smplx/conditioned/xsub.test.h5")
     parser.add_argument("--xyz_cache", default=None)
-    parser.add_argument("--split", default="test", choices=("train", "test"))
+    parser.add_argument("--split", default="test", choices=("train", "val", "test"))
     parser.add_argument("--window_len", type=int, default=60)
     parser.add_argument("--obs_len", type=int, default=20)
     parser.add_argument("--pred_len", type=int, default=40)

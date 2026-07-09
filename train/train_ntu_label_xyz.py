@@ -186,7 +186,7 @@ def _eval_args(args, checkpoint_path):
     return SimpleNamespace(
         mode="checkpoint",
         data_path=args.eval_data_path,
-        split="test",
+        split=args.eval_split,
         window_len=args.window_len,
         obs_len=args.obs_len,
         pred_len=args.pred_len,
@@ -313,6 +313,7 @@ def build_arg_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--train_data_path", default="dataset/ntu120/smplx/conditioned/xsub.train.h5")
     parser.add_argument("--eval_data_path", default="dataset/ntu120/smplx/conditioned/xsub.test.h5")
+    parser.add_argument("--eval_split", default="test", choices=("train", "val", "test"))
     parser.add_argument("--train_xyz_cache", default=None)
     parser.add_argument("--eval_xyz_cache", default=None)
     parser.add_argument("--save_dir", required=True)
