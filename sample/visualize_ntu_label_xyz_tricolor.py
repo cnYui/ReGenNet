@@ -87,13 +87,28 @@ def _load_edges(path, body_only):
     return edges
 
 
-def _load_source(source_dir):
+def _resolve_metrics_path(source_dir, metrics_filename):
+    if metrics_filename is not None:
+        path = (
+            metrics_filename
+            if os.path.isabs(metrics_filename)
+            else os.path.join(source_dir, metrics_filename)
+        )
+        if not os.path.exists(path):
+            raise FileNotFoundError(path)
+        return path
+    for filename in ("metrics_val.json", "metrics_test.json"):
+        path = os.path.join(source_dir, filename)
+        if os.path.exists(path):
+            return path
+    raise FileNotFoundError("未找到 metrics_val.json 或 metrics_test.json: {}".format(source_dir))
+
+
+def _load_source(source_dir, metrics_filename):
     array_path = os.path.join(source_dir, "arrays", "ntu_label_xyz_samples.pt")
-    metrics_path = os.path.join(source_dir, "metrics_test.json")
+    metrics_path = _resolve_metrics_path(source_dir, metrics_filename)
     if not os.path.exists(array_path):
         raise FileNotFoundError(array_path)
-    if not os.path.exists(metrics_path):
-        raise FileNotFoundError(metrics_path)
     data = torch.load(array_path, map_location="cpu")
     with open(metrics_path) as f:
         metrics = json.load(f)
@@ -101,7 +116,7 @@ def _load_source(source_dir):
     missing = [key for key in required if key not in data]
     if missing:
         raise ValueError("数组文件缺少字段: {}".format(missing))
-    return data, metrics
+    return data, metrics, metrics_path
 
 
 def _ensure_xyz(name, value, seq_len):
@@ -218,7 +233,7 @@ def _case_metrics(pred_xyz, target_xyz, copy_xyz):
 
 def run_visualization(args):
     _prepare_save_dir(args)
-    data, metrics = _load_source(args.source_dir)
+    data, metrics, metrics_path = _load_source(args.source_dir, args.metrics_filename)
     obs = data["obs_xyz"].numpy().astype(np.float32)
     target = data["target_xyz"].numpy().astype(np.float32)
     pred = data["pred_xyz"].numpy().astype(np.float32)
@@ -290,6 +305,7 @@ def run_visualization(args):
             [
                 ("created_at", _utc_now()),
                 ("source_dir", args.source_dir),
+                ("metrics_path", metrics_path),
                 ("save_dir", args.save_dir),
                 ("num_videos", count),
                 ("fps", args.fps),
@@ -324,6 +340,7 @@ def run_visualization(args):
 def build_arg_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--source_dir", required=True)
+    parser.add_argument("--metrics_filename", default=None)
     parser.add_argument("--save_dir", required=True)
     parser.add_argument("--num_videos", type=int, default=8)
     parser.add_argument("--fps", type=int, default=20)
