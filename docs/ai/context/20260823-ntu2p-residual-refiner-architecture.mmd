@@ -1,0 +1,48 @@
+flowchart LR
+    OBS["obs_xyz<br/>[B,10,2,55,3]"]
+    ACT["action label<br/>[B]"]
+
+    subgraph BASE["共享冻结单人预测锚点"]
+        SPLIT_BASE["拆分 Person A / Person B"]
+        BASE_MODEL["同一 NTULabelXYZTransformer<br/>num_persons=1；参数共享；默认冻结"]
+        BASE_A["base_A<br/>[B,50,1,55,3]"]
+        BASE_B["base_B<br/>[B,50,1,55,3]"]
+        SPLIT_BASE --> BASE_MODEL --> BASE_A
+        BASE_MODEL --> BASE_B
+    end
+
+    subgraph ENCODER["双人显式交互编码器 ×2"]
+        SPLIT_OBS["拆分 Person A / Person B"]
+        PROJ_OBS["共享输入投影<br/>Linear(165,256)"]
+        TEMP_OBS["A/B temporal self-attention"]
+        CROSS_OBS["双向 cross-person attention<br/>A ← B；B ← A"]
+        SUM_OBS["A/B summaries + contextual tokens"]
+        SPLIT_OBS --> PROJ_OBS --> TEMP_OBS --> CROSS_OBS --> SUM_OBS
+    end
+
+    subgraph DECODER["双人未来解码器 ×2"]
+        PROJ_FUT["共享 future 投影<br/>Linear(165,256)"]
+        TEMP_FUT["A/B future temporal self-attention"]
+        CROSS_FUT["双向 future cross-person attention"]
+        MEM_ATT["查询 action + A/B history memory"]
+        DELTA["共享输出投影<br/>Linear(256,165)<br/>delta_A / delta_B"]
+        PROJ_FUT --> TEMP_FUT --> CROSS_FUT --> MEM_ATT --> DELTA
+    end
+
+    OBS --> SPLIT_BASE
+    OBS --> SPLIT_OBS
+    ACT --> BASE_MODEL
+    ACT --> SUM_OBS
+    BASE_A --> PROJ_FUT
+    BASE_B --> PROJ_FUT
+    SUM_OBS --> MEM_ATT
+
+    RAMP["时间 ramp<br/>第一帧 delta 固定为 0"]
+    ALPHA["可学习共享 alpha<br/>初始化 1"]
+    ADD["pred_xyz = base_xyz + alpha × ramp(delta)"]
+    BASE_A --> ADD
+    BASE_B --> ADD
+    DELTA --> RAMP --> ADD
+    ALPHA --> ADD
+    OUT["双人 future50<br/>[B,50,2,55,3]"]
+    ADD --> OUT

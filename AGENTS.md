@@ -20,6 +20,7 @@
 - NTU 双人显式跨人 attention diffusion 已实现并完成 CUDA `5000 step` 训练：共享单人投影、人物内 temporal self-attention、双向 cross-attention、24-token memory 和分人物 future decoder。实现、训练计划与结果见 `docs/ai/context/20260822-193000-ntu2p-explicit-cross-person-attention-training-plan.md`、`docs/ai/context/20260822-193000-ntu2p-explicit-cross-person-attention-training-result.md`；当前五个 val checkpoint 的 `DDIM50` paired xyz 主指标仍未超过 `copy-last`，尚不能声称 attention 带来性能提升。
 - NTU 双人 baseline residual-refinement 已完成 CUDA `5000 step`：冻结 independent single-person xyz baseline，新增双流 temporal self-attention、双向 cross-person attention 和零初始化 residual head。1000/2000/3000/4000/5000 五个 val checkpoint 均同时超过 inherited baseline 与 `copy-last` 的 paired `xyz_mse/xyz_mae/mpjpe`，首帧误差保持 0。结果见 `docs/ai/context/20260822-214340-ntu2p-baseline-residual-refinement-training-result.md`；下一步固定其他条件扫描 `inter_loss_weight=0.01/0.05/0.1`，计划见 `docs/ai/context/20260822-214340-ntu2p-residual-inter-loss-ablation-plan.md`。
 - NTU 双人 residual refinement 的 `inter_loss_weight=0.01/0.05/0.1` 消融已完成。`0.01` 的最终 5000 step 最好，但没有在所有中间 checkpoint 稳定超过 `lambda=0`；`0.05/0.1` 中后期主指标退化。下一阶段默认保留 `inter_loss_weight=0`，先迁移到 residual diffusion；完整结果见 `docs/ai/context/20260822-222701-ntu2p-residual-inter-loss-ablation-result.md`。
+- 当前最佳 residual refiner 的架构图、可复用 xyz 导出脚本和 8 个最佳案例视频已生成；架构与指标记录见 `docs/ai/context/20260823-084520-ntu2p-residual-refiner-architecture-visualization-result.md`。
 
 ## 解释边界
 
