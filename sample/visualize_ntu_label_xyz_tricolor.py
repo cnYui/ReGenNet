@@ -104,8 +104,8 @@ def _resolve_metrics_path(source_dir, metrics_filename):
     raise FileNotFoundError("未找到 metrics_val.json 或 metrics_test.json: {}".format(source_dir))
 
 
-def _load_source(source_dir, metrics_filename):
-    array_path = os.path.join(source_dir, "arrays", "ntu_label_xyz_samples.pt")
+def _load_source(source_dir, metrics_filename, array_filename):
+    array_path = os.path.join(source_dir, "arrays", array_filename)
     metrics_path = _resolve_metrics_path(source_dir, metrics_filename)
     if not os.path.exists(array_path):
         raise FileNotFoundError(array_path)
@@ -166,7 +166,7 @@ def _draw_two_person(ax, frame_xyz, edges, color, linewidth, alpha):
     _draw_person(ax, frame_xyz[1], edges, color, linewidth, alpha)
 
 
-def _setup_axis(ax, center, radius, title):
+def _setup_axis(ax, center, radius, title, obs_label, generated_label, real_label):
     ax.set_xlim(center[0] - radius, center[0] + radius)
     ax.set_ylim(center[2] - radius, center[2] + radius)
     ax.set_zlim(center[1] - radius, center[1] + radius)
@@ -182,16 +182,24 @@ def _setup_axis(ax, center, radius, title):
     ax.set_zlabel("")
     ax.set_title(title, fontsize=9)
     handles = [
-        Line2D([0], [0], color=COLORS["observed"], lw=3, label="Input obs20"),
-        Line2D([0], [0], color=COLORS["generated"], lw=3, label="Generated future40"),
-        Line2D([0], [0], color=COLORS["real"], lw=3, label="Real future40"),
+        Line2D([0], [0], color=COLORS["observed"], lw=3, label=obs_label),
+        Line2D([0], [0], color=COLORS["generated"], lw=3, label=generated_label),
+        Line2D([0], [0], color=COLORS["real"], lw=3, label=real_label),
     ]
     ax.legend(handles=handles, loc="lower left", frameon=True, framealpha=0.92)
 
 
-def _draw_frame(ax, frame_idx, obs_xyz, pred_xyz, target_xyz, edges, center, radius, title_prefix):
+def _draw_frame(ax, frame_idx, obs_xyz, pred_xyz, target_xyz, edges, center, radius, title_prefix, labels):
     total = int(obs_xyz.shape[0] + target_xyz.shape[0])
-    _setup_axis(ax, center, radius, "{} | frame {}/{}".format(title_prefix, frame_idx + 1, total))
+    _setup_axis(
+        ax,
+        center,
+        radius,
+        "{} | frame {}/{}".format(title_prefix, frame_idx + 1, total),
+        labels["obs"],
+        labels["generated"],
+        labels["real"],
+    )
     if frame_idx < obs_xyz.shape[0]:
         _draw_two_person(ax, obs_xyz[frame_idx], edges, COLORS["observed"], 2.5, 0.96)
     else:
@@ -200,7 +208,7 @@ def _draw_frame(ax, frame_idx, obs_xyz, pred_xyz, target_xyz, edges, center, rad
         _draw_two_person(ax, target_xyz[future_idx], edges, COLORS["real"], 2.1, 0.9)
 
 
-def _render_video(video_path, frame_path, obs_xyz, pred_xyz, target_xyz, edges, title_prefix, fps, dpi):
+def _render_video(video_path, frame_path, obs_xyz, pred_xyz, target_xyz, edges, title_prefix, fps, dpi, labels):
     center, radius = _axis_limits(obs_xyz, pred_xyz, target_xyz)
     total = int(obs_xyz.shape[0] + target_xyz.shape[0])
     fig = plt.figure(figsize=(6.4, 6.4), dpi=int(dpi))
@@ -209,7 +217,7 @@ def _render_video(video_path, frame_path, obs_xyz, pred_xyz, target_xyz, edges, 
     try:
         for frame_idx in range(total):
             ax.clear()
-            _draw_frame(ax, frame_idx, obs_xyz, pred_xyz, target_xyz, edges, center, radius, title_prefix)
+            _draw_frame(ax, frame_idx, obs_xyz, pred_xyz, target_xyz, edges, center, radius, title_prefix, labels)
             fig.canvas.draw()
             image = np.asarray(fig.canvas.buffer_rgba())[:, :, :3]
             if frame_idx == 0:
@@ -233,15 +241,22 @@ def _case_metrics(pred_xyz, target_xyz, copy_xyz):
 
 def run_visualization(args):
     _prepare_save_dir(args)
-    data, metrics, metrics_path = _load_source(args.source_dir, args.metrics_filename)
+    data, metrics, metrics_path = _load_source(args.source_dir, args.metrics_filename, args.array_filename)
     obs = data["obs_xyz"].numpy().astype(np.float32)
     target = data["target_xyz"].numpy().astype(np.float32)
     pred = data["pred_xyz"].numpy().astype(np.float32)
     copy_last = data["copy_last_xyz"].numpy().astype(np.float32)
-    _ensure_xyz("obs_xyz", obs, 20)
-    _ensure_xyz("target_xyz", target, 40)
-    _ensure_xyz("pred_xyz", pred, 40)
+    _ensure_xyz("obs_xyz", obs, args.obs_len)
+    _ensure_xyz("target_xyz", target, args.pred_len)
+    _ensure_xyz("pred_xyz", pred, args.pred_len)
     edges = _load_edges(args.smplx_model, args.body_only)
+    labels = OrderedDict(
+        [
+            ("obs", args.obs_label),
+            ("generated", args.generated_label),
+            ("real", args.real_label),
+        ]
+    )
     count = min(int(args.num_videos), int(obs.shape[0]))
     rows = []
     for index in range(count):
@@ -279,6 +294,7 @@ def run_visualization(args):
             title,
             args.fps,
             args.dpi,
+            labels,
         )
         rows.append(
             OrderedDict(
@@ -311,6 +327,10 @@ def run_visualization(args):
                 ("fps", args.fps),
                 ("dpi", args.dpi),
                 ("colors", COLORS),
+                ("array_filename", args.array_filename),
+                ("obs_len", int(args.obs_len)),
+                ("pred_len", int(args.pred_len)),
+                ("labels", labels),
                 ("visualization_boundary", "true two-person xyz skeleton [T,2,55,3]; blue obs, orange generated, green real"),
                 ("flip_z_axis", bool(args.flip_z_axis)),
                 ("metrics", metrics),
@@ -323,8 +343,14 @@ def run_visualization(args):
     with open(os.path.join(args.save_dir, "summary.md"), "w") as f:
         f.write("# NTU Two-Person XYZ Tricolor Skeleton Videos\n\n")
         f.write("source_dir: `{}`\n\n".format(args.source_dir))
-        f.write("颜色: 蓝色 input obs20，橙色 generated future40，绿色 real future40。\n\n")
-        f.write("边界: 这是直接 xyz skeleton 双人可视化，不再使用单人 rot6d 转换。\n\n")
+        f.write(
+            "颜色: 蓝色 {}，橙色 {}，绿色 {}。\n\n".format(
+                args.obs_label,
+                args.generated_label,
+                args.real_label,
+            )
+        )
+        f.write("边界: 这是 xyz skeleton 双人可视化，不再使用单人 rot6d 转换。\n\n")
         f.write("| index | action | model_mse | copy_mse | model_mae | copy_mae | video |\n")
         f.write("|---:|---|---:|---:|---:|---:|---|\n")
         for row in rows:
@@ -341,7 +367,13 @@ def build_arg_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--source_dir", required=True)
     parser.add_argument("--metrics_filename", default=None)
+    parser.add_argument("--array_filename", default="ntu_label_xyz_samples.pt")
     parser.add_argument("--save_dir", required=True)
+    parser.add_argument("--obs_len", type=int, default=20)
+    parser.add_argument("--pred_len", type=int, default=40)
+    parser.add_argument("--obs_label", default="Input obs20")
+    parser.add_argument("--generated_label", default="Generated future40")
+    parser.add_argument("--real_label", default="Real future40")
     parser.add_argument("--num_videos", type=int, default=8)
     parser.add_argument("--fps", type=int, default=20)
     parser.add_argument("--dpi", type=int, default=120)
