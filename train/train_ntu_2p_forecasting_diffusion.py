@@ -396,6 +396,10 @@ def _core_config_keys():
         "decoder_layers",
         "num_heads",
         "ff_size",
+        "architecture",
+        "cross_person_attention",
+        "obs_memory_tokens",
+        "future_token_count",
         "representation",
         "person_order",
     )

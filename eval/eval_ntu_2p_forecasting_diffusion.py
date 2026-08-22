@@ -392,6 +392,27 @@ def _load_direct_checkpoint(path, device):
     return model, state
 
 
+def _load_independent_single_person_checkpoint(path, device):
+    model, state = _load_direct_checkpoint(path, device)
+    if int(model.num_persons) != 1:
+        raise ValueError("独立单人 baseline checkpoint 必须 num_persons=1，当前为 {}".format(model.num_persons))
+    if state.get("representation") not in (None, "independent_single_person_xyz"):
+        raise ValueError("checkpoint representation 不是 independent_single_person_xyz")
+    return model, state
+
+
+def _independent_single_person_forward(model, obs_xyz, action):
+    if int(obs_xyz.shape[2]) != 2:
+        raise ValueError("独立单人 baseline 需要双人 obs_xyz")
+    batch_size = int(obs_xyz.shape[0])
+    obs_single = torch.cat((obs_xyz[:, :, 0:1], obs_xyz[:, :, 1:2]), dim=0)
+    action_single = torch.cat((action, action), dim=0)
+    pred_single = model(obs_single, action_single)
+    if tuple(pred_single.shape[2:]) != (1, 55, 3):
+        raise ValueError("单人模型输出必须为 [B,T,1,55,3]，当前为 {}".format(tuple(pred_single.shape)))
+    return torch.cat((pred_single[:batch_size], pred_single[batch_size:]), dim=2)
+
+
 def _copy_last_rot6d(obs_rot6d, pred_len):
     check_ntu_2p_rot6d(obs_rot6d)
     return obs_rot6d[..., -1:].expand(-1, -1, -1, int(pred_len)).contiguous()
@@ -411,6 +432,10 @@ def _evaluate_once(args, dataset, loader, device, sample_seed):
         if args.checkpoint is None:
             raise ValueError("--mode direct 必须提供 --checkpoint")
         model, checkpoint_state = _load_direct_checkpoint(args.checkpoint, device)
+    elif args.mode == "independent_single_person":
+        if args.checkpoint is None:
+            raise ValueError("--mode independent_single_person 必须提供 --checkpoint")
+        model, checkpoint_state = _load_independent_single_person_checkpoint(args.checkpoint, device)
     elif args.mode == "diffusion":
         if args.checkpoint is None:
             raise ValueError("--mode diffusion 必须提供 --checkpoint")
@@ -461,6 +486,13 @@ def _evaluate_once(args, dataset, loader, device, sample_seed):
                 pred_xyz = copy_xyz
             elif args.mode == "direct":
                 pred_xyz, elapsed = _timed_model_call(device, lambda: model(obs_xyz, action))
+                model_inference_seconds += elapsed
+                model_inference_batches += 1
+            elif args.mode == "independent_single_person":
+                pred_xyz, elapsed = _timed_model_call(
+                    device,
+                    lambda: _independent_single_person_forward(model, obs_xyz, action),
+                )
                 model_inference_seconds += elapsed
                 model_inference_batches += 1
             elif args.mode == "diffusion":
@@ -621,7 +653,7 @@ def evaluate_ntu2p_forecasting_diffusion(args):
 
 def build_arg_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", default="diffusion", choices=("copy_last", "direct", "diffusion"))
+    parser.add_argument("--mode", default="diffusion", choices=("copy_last", "direct", "independent_single_person", "diffusion"))
     parser.add_argument("--manifest_path", required=True)
     parser.add_argument("--train_data_path", default="dataset/ntu120/smplx/conditioned/xsub.train.h5")
     parser.add_argument("--test_data_path", default="dataset/ntu120/smplx/conditioned/xsub.test.h5")

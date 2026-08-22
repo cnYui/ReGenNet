@@ -82,6 +82,8 @@ class NTULabelXYZTransformer(nn.Module):
         self.pred_len = int(pred_len)
         self.num_actions = int(num_actions)
         self.num_persons = int(num_persons)
+        if self.num_persons not in (1, NTU_NUM_PERSONS):
+            raise ValueError("num_persons 只支持 1 或 2，当前为 {}".format(self.num_persons))
         self.num_joints = int(num_joints)
         self.coord_dim = int(coord_dim)
         self.latent_dim = int(latent_dim)
@@ -178,7 +180,7 @@ class NTULabelXYZTransformer(nn.Module):
         }
 
     def forward(self, obs_xyz, action):
-        check_ntu_xyz("obs_xyz", obs_xyz, seq_len=self.obs_len)
+        check_ntu_xyz("obs_xyz", obs_xyz, seq_len=self.obs_len, num_persons=self.num_persons)
         batch_size = int(obs_xyz.shape[0])
         action = _normalize_action(action, batch_size, self.num_actions, obs_xyz.device)
 
@@ -209,11 +211,11 @@ class NTULabelXYZTransformer(nn.Module):
         ).view(1, self.pred_len, 1, 1, 1)
         delta = delta * ramp
         pred = obs_xyz[:, -1:].expand(-1, self.pred_len, -1, -1, -1) + delta
-        check_ntu_xyz("pred_xyz", pred, seq_len=self.pred_len)
+        check_ntu_xyz("pred_xyz", pred, seq_len=self.pred_len, num_persons=self.num_persons)
         return pred
 
     def training_loss(self, obs_xyz, target_xyz, action, action_classifier=None, action_normalizer=None):
-        check_ntu_xyz("target_xyz", target_xyz, seq_len=self.pred_len)
+        check_ntu_xyz("target_xyz", target_xyz, seq_len=self.pred_len, num_persons=self.num_persons)
         pred = self.forward(obs_xyz, action)
         loss = F.mse_loss(pred, target_xyz)
         if self.mae_loss_weight > 0:

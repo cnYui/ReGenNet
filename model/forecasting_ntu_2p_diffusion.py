@@ -5,20 +5,25 @@ import torch.nn as nn
 
 from model.cmdm import (
     EmbedAction,
-    InputProcess,
-    OutputProcess,
     PositionalEncoding,
     TimestepEmbedder,
+)
+from model.two_person_transformer import (
+    TwoPersonForecastingDecoder,
+    TwoPersonInteractionEncoder,
 )
 from utils.ntu_2p_rot6d import (
     NTU_2P_NUM_JOINTS_WITH_TRANS,
     NTU_2P_PERSON_ORDER,
     NTU_2P_REPRESENTATION,
     NTU_2P_ROT6D_FEATS,
+    NTU_2P_SINGLE_ROT6D_FEATS,
+    join_ntu_2p_rot6d,
+    split_ntu_2p_rot6d,
 )
 
 
-MODEL_TYPE = "ntu2p_forecasting_diffusion_decoder"
+MODEL_TYPE = "ntu2p_forecasting_diffusion_cross_person"
 NUM_ACTIONS = 26
 DIFFUSION_STEPS = 1000
 
@@ -116,6 +121,7 @@ class NTU2PForecastingDiffusionDecoder(nn.Module):
         self.njoints = int(njoints)
         self.nfeats = int(nfeats)
         self.input_feats = self.njoints * self.nfeats
+        self.single_input_feats = self.njoints * NTU_2P_SINGLE_ROT6D_FEATS
         self.num_actions = int(num_actions)
         self.obs_len = int(obs_len)
         self.pred_len = int(pred_len)
@@ -144,41 +150,27 @@ class NTU2PForecastingDiffusionDecoder(nn.Module):
         self.person_order = person_order
         self.init_rot2xyz = bool(init_rot2xyz)
 
-        self.obs_input_process = InputProcess(self.data_rep, self.input_feats, self.latent_dim)
-        self.future_input_process = InputProcess(self.data_rep, self.input_feats, self.latent_dim)
-        self.output_process = OutputProcess(
-            self.data_rep,
-            self.input_feats,
-            self.latent_dim,
-            self.njoints,
-            self.nfeats,
-        )
+        self.shared_input_proj = nn.Linear(self.single_input_feats, self.latent_dim)
+        self.shared_output_proj = nn.Linear(self.latent_dim, self.single_input_feats)
         self.sequence_pos_encoder = PositionalEncoding(self.latent_dim, self.dropout)
         self.embed_timestep = TimestepEmbedder(self.latent_dim, self.sequence_pos_encoder)
         self.embed_action = EmbedAction(self.num_actions, self.latent_dim)
 
-        obs_encoder_layer = nn.TransformerEncoderLayer(
-            d_model=self.latent_dim,
-            nhead=self.num_heads,
-            dim_feedforward=self.ff_size,
-            dropout=self.dropout,
-            activation=self.activation,
-        )
-        self.obs_encoder = nn.TransformerEncoder(
-            obs_encoder_layer,
+        self.obs_encoder = TwoPersonInteractionEncoder(
             num_layers=self.obs_encoder_layers,
-        )
-
-        decoder_layer = nn.TransformerDecoderLayer(
             d_model=self.latent_dim,
             nhead=self.num_heads,
             dim_feedforward=self.ff_size,
             dropout=self.dropout,
             activation=self.activation,
         )
-        self.seqTransDecoder = nn.TransformerDecoder(
-            decoder_layer,
+        self.seqTransDecoder = TwoPersonForecastingDecoder(
             num_layers=self.decoder_layers,
+            d_model=self.latent_dim,
+            nhead=self.num_heads,
+            dim_feedforward=self.ff_size,
+            dropout=self.dropout,
+            activation=self.activation,
         )
 
         self.time_type = nn.Parameter(torch.zeros(1, 1, self.latent_dim))
@@ -190,6 +182,10 @@ class NTU2PForecastingDiffusionDecoder(nn.Module):
         self.memory_norm = nn.LayerNorm(self.latent_dim)
         self.memory_proj = nn.Linear(self.latent_dim, self.latent_dim)
         self.future_norm = nn.LayerNorm(self.latent_dim)
+        self.architecture = "explicit_cross_person_attention"
+        self.cross_person_attention = True
+        self.obs_memory_tokens = 24
+        self.future_token_count = self.pred_len * 2
 
         self.rot2xyz = None
         if self.init_rot2xyz:
@@ -229,6 +225,10 @@ class NTU2PForecastingDiffusionDecoder(nn.Module):
             "person_order": self.person_order,
             "num_person": 2,
             "init_rot2xyz": self.init_rot2xyz,
+            "architecture": self.architecture,
+            "cross_person_attention": self.cross_person_attention,
+            "obs_memory_tokens": self.obs_memory_tokens,
+            "future_token_count": self.future_token_count,
         }
 
     def add_window_pos(self, tokens, start):
@@ -301,6 +301,18 @@ class NTU2PForecastingDiffusionDecoder(nn.Module):
         mask = torch.full((self.pred_len, self.pred_len), float("-inf"), device=device)
         return torch.triu(mask, diagonal=1)
 
+    def _person_tokens(self, motion):
+        person_a, person_b = split_ntu_2p_rot6d(motion)
+        batch_size, _, _, seq_len = person_a.shape
+        person_a = person_a.permute(3, 0, 1, 2).reshape(seq_len, batch_size, self.single_input_feats)
+        person_b = person_b.permute(3, 0, 1, 2).reshape(seq_len, batch_size, self.single_input_feats)
+        return self.shared_input_proj(person_a), self.shared_input_proj(person_b)
+
+    def _person_output(self, person_tokens):
+        seq_len, batch_size, _ = person_tokens.shape
+        output = self.shared_output_proj(person_tokens)
+        return output.reshape(seq_len, batch_size, self.njoints, NTU_2P_SINGLE_ROT6D_FEATS).permute(1, 2, 3, 0)
+
     def forward(self, x_t, timesteps, y=None):
         if y is None or not isinstance(y, dict):
             raise ValueError("NTU2PForecastingDiffusionDecoder.forward 需要 dict 类型的 y")
@@ -318,33 +330,37 @@ class NTU2PForecastingDiffusionDecoder(nn.Module):
         )
         force_uncond = self._force_uncond(y)
 
-        obs_tokens = self.obs_input_process(obs_motion)
-        obs_tokens = self.add_window_pos(obs_tokens, 0)
-        obs_tokens = obs_tokens + self.obs_frame_type
-        obs_tokens = self.obs_encoder(obs_tokens)
+        obs_a, obs_b = self._person_tokens(obs_motion)
+        obs_a = self.add_window_pos(obs_a, 0) + self.obs_frame_type
+        obs_b = self.add_window_pos(obs_b, 0) + self.obs_frame_type
+        obs_a, obs_b = self.obs_encoder(obs_a, obs_b)
 
-        obs_summary = obs_tokens.mean(dim=0, keepdim=True)
-        obs_summary = obs_summary + self.obs_summary_type
+        obs_a_summary = obs_a.mean(dim=0, keepdim=True) + self.obs_summary_type
+        obs_b_summary = obs_b.mean(dim=0, keepdim=True) + self.obs_summary_type
 
         time_token = self.embed_timestep(timesteps) + self.time_type
         action_emb = self.embed_action(action)
         action_emb = self.mask_action(action_emb, force_mask=force_uncond)
         action_token = action_emb.unsqueeze(0) + self.action_type
 
-        memory = torch.cat([time_token, action_token, obs_summary, obs_tokens], dim=0)
+        memory = torch.cat([time_token, action_token, obs_a_summary, obs_b_summary, obs_a, obs_b], dim=0)
+        if int(memory.shape[0]) != self.obs_memory_tokens:
+            raise ValueError("显式双人 memory 必须有 24 个 token，当前 {}".format(int(memory.shape[0])))
         memory = self.memory_proj(self.memory_norm(memory))
 
-        future_tokens = self.future_input_process(x_t)
-        future_tokens = self.add_window_pos(future_tokens, self.obs_len)
-        future_tokens = self.future_norm(future_tokens + self.future_type)
+        future_a, future_b = self._person_tokens(x_t)
+        future_a = self.add_window_pos(future_a, self.obs_len) + self.future_type
+        future_b = self.add_window_pos(future_b, self.obs_len) + self.future_type
+        future_a = self.future_norm(future_a)
+        future_b = self.future_norm(future_b)
 
-        decoded = self.seqTransDecoder(
-            tgt=future_tokens,
+        decoded_a, decoded_b = self.seqTransDecoder(
+            future_a,
+            future_b,
             memory=memory,
-            tgt_mask=self._future_mask(device),
-            memory_mask=None,
+            temporal_mask=self._future_mask(device),
         )
-        output = self.output_process(decoded)
+        output = join_ntu_2p_rot6d(self._person_output(decoded_a), self._person_output(decoded_b))
         if tuple(output.shape) != tuple(x_t.shape):
             raise ValueError("输出 shape 必须等于 x_t，当前 {} vs {}".format(_shape_text(output), _shape_text(x_t)))
         _ensure_finite("output", output)

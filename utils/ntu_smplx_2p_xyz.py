@@ -53,10 +53,10 @@ def check_ntu_motion(name, value, seq_len=None):
         raise ValueError("{} 存在非有限数值".format(name))
 
 
-def check_ntu_xyz(name, value, seq_len=None):
+def check_ntu_xyz(name, value, seq_len=None, num_persons=NTU_NUM_PERSONS):
     if value.dim() != 5:
-        raise ValueError("{} 必须是 [B,T,2,55,3]，当前维度数为 {}".format(name, value.dim()))
-    expected_tail = (NTU_NUM_PERSONS, NTU_SMPLX_BODY_JOINTS, XYZ_COORD_DIM)
+        raise ValueError("{} 必须是 [B,T,{},55,3]，当前维度数为 {}".format(name, int(num_persons), value.dim()))
+    expected_tail = (int(num_persons), NTU_SMPLX_BODY_JOINTS, XYZ_COORD_DIM)
     if tuple(value.shape[2:]) != expected_tail:
         raise ValueError("{} 后三维必须是 {}，当前为 {}".format(name, expected_tail, tuple(value.shape[2:])))
     if seq_len is not None and int(value.shape[1]) != int(seq_len):
