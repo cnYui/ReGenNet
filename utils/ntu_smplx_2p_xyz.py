@@ -1,3 +1,4 @@
+import math
 from collections import OrderedDict
 
 import torch
@@ -231,3 +232,120 @@ def compute_ntu_xyz_metrics(pred_xyz, target_xyz, obs_xyz):
         if not torch.isfinite(torch.tensor(float(value))):
             raise ValueError("{} 指标为非有限数值: {}".format(key, value))
     return metrics
+
+
+# 约为 val GT 局部姿态帧间位移中位数（0.00107 m）的 10%，固定为常量以便跨 run 比较。
+NTU_ARTICULATION_FROZEN_EPSILON = 0.001
+
+NTU_ARTICULATION_METRIC_KEYS = (
+    "articulation_energy",
+    "articulation_energy_target",
+    "root_energy",
+    "root_energy_target",
+    "local_pose_temporal_std",
+    "local_pose_temporal_std_target",
+    "frozen_ratio",
+    "frozen_ratio_target",
+    "root_mse",
+    "local_mse",
+    "dct_low_energy",
+    "dct_low_energy_target",
+    "dct_mid_energy",
+    "dct_mid_energy_target",
+    "dct_high_energy",
+    "dct_high_energy_target",
+)
+
+# T=50 @ 20 FPS 时 DCT 系数 k 对应 k*0.2 Hz：low=k1-5(<=1Hz) 慢速形变，mid=k6-10(1.2-2Hz) 步态/手势，high=k>=11 多为拟合抖动。
+NTU_DCT_BAND_EDGES = (1, 6, 11)
+
+
+def local_pose_velocity(value):
+    pose = local_pose(value)
+    return pose[:, 1:] - pose[:, :-1]
+
+
+def dct_matrix(seq_len, device=None, dtype=torch.float32):
+    """正交 DCT-II 矩阵 [k, t]。"""
+    seq_len = int(seq_len)
+    k = torch.arange(seq_len, dtype=dtype, device=device).unsqueeze(1)
+    t = torch.arange(seq_len, dtype=dtype, device=device).unsqueeze(0)
+    matrix = torch.cos(math.pi * (t + 0.5) * k / seq_len) * math.sqrt(2.0 / seq_len)
+    matrix[0] = matrix[0] / math.sqrt(2.0)
+    return matrix
+
+
+def local_pose_dct(value):
+    """局部姿态沿时间轴的 DCT 系数 [B, K, P, J, 3]。"""
+    pose = local_pose(value)
+    matrix = dct_matrix(pose.shape[1], device=pose.device, dtype=pose.dtype)
+    return torch.einsum("kt,btpjc->bkpjc", matrix, pose)
+
+
+def dct_band_energies(value, edges=NTU_DCT_BAND_EDGES):
+    """帧差能量被 ω² 加权、由抖动主导；位置域 DCT 分频带能量 [B,P,J,3] 才能区分真实摆动与噪声。"""
+    coeff = local_pose_dct(value)
+    energy = coeff * coeff
+    low_start, mid_start, high_start = (int(edge) for edge in edges)
+    return OrderedDict(
+        [
+            ("low", energy[:, low_start:mid_start].sum(dim=1)),
+            ("mid", energy[:, mid_start:high_start].sum(dim=1)),
+            ("high", energy[:, high_start:].sum(dim=1)),
+        ]
+    )
+
+
+def compute_ntu_articulation_metrics(pred_xyz, target_xyz, frozen_epsilon=NTU_ARTICULATION_FROZEN_EPSILON):
+    """摆动幅度类指标：`xyz_mse/xyz_mae/mpjpe` 对'关节是否真的在动'不敏感，需单独报告。"""
+    check_ntu_xyz("pred_xyz", pred_xyz)
+    check_ntu_xyz("target_xyz", target_xyz, seq_len=pred_xyz.shape[1])
+    if tuple(pred_xyz.shape) != tuple(target_xyz.shape):
+        raise ValueError("pred_xyz/target_xyz shape 必须一致")
+
+    pred_lv = local_pose_velocity(pred_xyz)
+    target_lv = local_pose_velocity(target_xyz)
+    pred_rv = root_positions(pred_xyz)[:, 1:] - root_positions(pred_xyz)[:, :-1]
+    target_rv = root_positions(target_xyz)[:, 1:] - root_positions(target_xyz)[:, :-1]
+
+    metrics = OrderedDict()
+    metrics["articulation_energy"] = _to_float((pred_lv * pred_lv).mean())
+    metrics["articulation_energy_target"] = _to_float((target_lv * target_lv).mean())
+    metrics["root_energy"] = _to_float((pred_rv * pred_rv).mean())
+    metrics["root_energy_target"] = _to_float((target_rv * target_rv).mean())
+    metrics["local_pose_temporal_std"] = _to_float(local_pose(pred_xyz).std(dim=1).mean())
+    metrics["local_pose_temporal_std_target"] = _to_float(local_pose(target_xyz).std(dim=1).mean())
+    metrics["frozen_ratio"] = _to_float((torch.norm(pred_lv, dim=-1) < float(frozen_epsilon)).float().mean())
+    metrics["frozen_ratio_target"] = _to_float((torch.norm(target_lv, dim=-1) < float(frozen_epsilon)).float().mean())
+    root_diff = root_positions(pred_xyz) - root_positions(target_xyz)
+    local_diff = local_pose(pred_xyz) - local_pose(target_xyz)
+    metrics["root_mse"] = _to_float((root_diff * root_diff).mean())
+    metrics["local_mse"] = _to_float((local_diff * local_diff).mean())
+    pred_bands = dct_band_energies(pred_xyz)
+    target_bands = dct_band_energies(target_xyz)
+    for band in ("low", "mid", "high"):
+        metrics["dct_{}_energy".format(band)] = _to_float(pred_bands[band].mean())
+        metrics["dct_{}_energy_target".format(band)] = _to_float(target_bands[band].mean())
+
+    if tuple(metrics.keys()) != NTU_ARTICULATION_METRIC_KEYS:
+        raise AssertionError("NTU articulation metrics key 不稳定")
+    for key, value in metrics.items():
+        if not torch.isfinite(torch.tensor(float(value))):
+            raise ValueError("{} 指标为非有限数值: {}".format(key, value))
+    return metrics
+
+
+def articulation_ratios(aggregated):
+    """由按样本数加权平均后的摆动指标计算相对 GT 的比值。"""
+    ratios = OrderedDict()
+    for key in (
+        "articulation_energy",
+        "root_energy",
+        "local_pose_temporal_std",
+        "dct_low_energy",
+        "dct_mid_energy",
+        "dct_high_energy",
+    ):
+        denominator = float(aggregated[key + "_target"])
+        ratios[key + "_ratio_to_target"] = float(aggregated[key]) / denominator if denominator > 0 else float("nan")
+    return ratios

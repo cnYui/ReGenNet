@@ -16,7 +16,13 @@ from model.forecasting_ntu2p_residual_xyz import load_ntu2p_residual_refiner_che
 from model.rotation2xyz import Rotation2xyz_x
 from utils.fixseed import fixseed
 from utils.ntu_2p_rot6d import ntu_2p_rot6d_to_xyz
-from utils.ntu_smplx_2p_xyz import check_ntu_xyz, compute_ntu_xyz_metrics, copy_last_xyz
+from utils.ntu_smplx_2p_xyz import (
+    articulation_ratios,
+    check_ntu_xyz,
+    compute_ntu_articulation_metrics,
+    compute_ntu_xyz_metrics,
+    copy_last_xyz,
+)
 
 
 def _device(value):
@@ -79,11 +85,9 @@ def evaluate(args):
     )
     model, checkpoint_state = load_ntu2p_residual_refiner_checkpoint(args.checkpoint, device)
     converter = Rotation2xyz_x(device=device, dataset="ntu120_2p")
-    totals = {
-        "model": OrderedDict(),
-        "base": OrderedDict(),
-        "copy_last": OrderedDict(),
-    }
+    variants = ("model", "base", "copy_last")
+    totals = {key: OrderedDict() for key in variants}
+    articulation_totals = {key: OrderedDict() for key in variants}
     count = 0
     with torch.no_grad():
         for batch in loader:
@@ -94,9 +98,9 @@ def evaluate(args):
             copy_xyz = copy_last_xyz(obs_xyz, args.pred_len)
             check_ntu_xyz("pred_xyz", pred_xyz, seq_len=args.pred_len, num_persons=2)
             batch_size = int(obs_xyz.shape[0])
-            _add(totals["model"], compute_ntu_xyz_metrics(pred_xyz, target_xyz, obs_xyz), batch_size)
-            _add(totals["base"], compute_ntu_xyz_metrics(base_xyz, target_xyz, obs_xyz), batch_size)
-            _add(totals["copy_last"], compute_ntu_xyz_metrics(copy_xyz, target_xyz, obs_xyz), batch_size)
+            for key, value in (("model", pred_xyz), ("base", base_xyz), ("copy_last", copy_xyz)):
+                _add(totals[key], compute_ntu_xyz_metrics(value, target_xyz, obs_xyz), batch_size)
+                _add(articulation_totals[key], compute_ntu_articulation_metrics(value, target_xyz), batch_size)
             count += batch_size
 
     result = OrderedDict(
@@ -111,12 +115,42 @@ def evaluate(args):
             ("copy_last_metrics", _finalize(totals["copy_last"], count)),
             ("beats_base", OrderedDict()),
             ("beats_copy_last", OrderedDict()),
+            ("articulation_metrics", OrderedDict()),
+            ("articulation_gate", OrderedDict()),
             ("checkpoint_step", int(checkpoint_state.get("step", -1))),
         ]
     )
     for key in ("xyz_mse", "xyz_mae", "mpjpe"):
         result["beats_base"][key] = result["model_metrics"][key] < result["base_metrics"][key]
         result["beats_copy_last"][key] = result["model_metrics"][key] < result["copy_last_metrics"][key]
+    for key in variants:
+        aggregated = _finalize(articulation_totals[key], count)
+        aggregated.update(articulation_ratios(aggregated))
+        result["articulation_metrics"][key] = aggregated
+
+    # 新 gate：L2 三项必须低于 copy-last（不变），且位置域 DCT 分频带能量比值达阈值，mpjpe 相对 base 回退不超过容忍度。
+    # 帧差能量/frozen 比例受 GT 拟合抖动主导（Stage 1 诊断），仅作报告不进 gate。
+    model_artic = result["articulation_metrics"]["model"]
+    mpjpe_regression = result["model_metrics"]["mpjpe"] / result["base_metrics"]["mpjpe"] - 1.0
+    gate = result["articulation_gate"]
+    gate["dct_low_ratio_threshold"] = float(args.articulation_gate_low_ratio)
+    gate["dct_mid_ratio_threshold"] = float(args.articulation_gate_mid_ratio)
+    gate["base_mpjpe_regression_tolerance"] = float(args.base_mpjpe_regression_tolerance)
+    gate["model_dct_low_ratio"] = float(model_artic["dct_low_energy_ratio_to_target"])
+    gate["model_dct_mid_ratio"] = float(model_artic["dct_mid_energy_ratio_to_target"])
+    gate["model_dct_high_ratio"] = float(model_artic["dct_high_energy_ratio_to_target"])
+    gate["model_energy_ratio"] = float(model_artic["articulation_energy_ratio_to_target"])
+    gate["model_frozen_ratio"] = float(model_artic["frozen_ratio"])
+    gate["model_mpjpe_regression_vs_base"] = float(mpjpe_regression)
+    gate["passes_l2_gate"] = all(result["beats_copy_last"].values())
+    gate["passes_articulation_gate"] = (
+        gate["model_dct_low_ratio"] >= gate["dct_low_ratio_threshold"]
+        and gate["model_dct_mid_ratio"] >= gate["dct_mid_ratio_threshold"]
+    )
+    gate["within_base_tolerance"] = mpjpe_regression <= gate["base_mpjpe_regression_tolerance"]
+    gate["passes_full_gate"] = (
+        gate["passes_l2_gate"] and gate["passes_articulation_gate"] and gate["within_base_tolerance"]
+    )
     _write_json(args.output, result)
     print(json.dumps(result, indent=2, ensure_ascii=False))
     return result
@@ -138,6 +172,9 @@ def build_arg_parser():
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--articulation_gate_low_ratio", type=float, default=0.40)
+    parser.add_argument("--articulation_gate_mid_ratio", type=float, default=0.10)
+    parser.add_argument("--base_mpjpe_regression_tolerance", type=float, default=0.05)
     return parser
 
 

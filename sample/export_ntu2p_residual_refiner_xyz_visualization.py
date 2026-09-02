@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import random
 from collections import OrderedDict
 
 import torch
@@ -112,9 +113,18 @@ def export(args):
         if not torch.isfinite(value.float()).all():
             raise ValueError("{} 存在非有限值".format(key))
 
-    case_scores.sort(key=lambda item: (-item["improvement"], item["model_xyz_mse"], item["index"]))
-    selected = case_scores[: min(int(args.num_visualization), count)]
-    indices = [item["index"] for item in selected]
+    num_selected = min(int(args.num_visualization), count)
+    if args.selection == "random":
+        # 按 L2 改进选例会系统性偏向 root 大位移样本，随机选例用于还原真实分布下的观感。
+        indices = sorted(random.Random(args.seed).sample(range(count), num_selected))
+        case_by_index = {item["index"]: item for item in case_scores}
+        selected = [case_by_index[index] for index in indices]
+        selection_policy = "uniform random (seed={})".format(int(args.seed))
+    else:
+        case_scores.sort(key=lambda item: (-item["improvement"], item["model_xyz_mse"], item["index"]))
+        selected = case_scores[:num_selected]
+        indices = [item["index"] for item in selected]
+        selection_policy = "descending copy_last_xyz_mse - model_xyz_mse"
     source_dir = os.path.abspath(args.output_dir)
     arrays_dir = os.path.join(source_dir, "arrays")
     os.makedirs(arrays_dir, exist_ok=True)
@@ -142,7 +152,7 @@ def export(args):
             ("base_metrics", _finalize(totals["base"], count)),
             ("copy_last_metrics", _finalize(totals["copy_last"], count)),
             ("visualization_num_samples", len(indices)),
-            ("visualization_selection", "descending copy_last_xyz_mse - model_xyz_mse"),
+            ("visualization_selection", selection_policy),
             ("visualization_indices", indices),
             ("visualization_cases", selected),
         ]
@@ -183,6 +193,7 @@ def build_arg_parser():
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--max_samples", type=int, default=-1)
     parser.add_argument("--num_visualization", type=int, default=8)
+    parser.add_argument("--selection", choices=("best_improvement", "random"), default="best_improvement")
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda:0")

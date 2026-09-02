@@ -1,5 +1,6 @@
 """继承独立单人 xyz baseline 的双人跨人残差预测器。"""
 
+import math
 from collections import OrderedDict
 
 import torch
@@ -21,8 +22,34 @@ MODEL_TYPE = "ntu2p_residual_refiner_xyz"
 NUM_ACTIONS = 26
 
 
+RAMP_MODES = ("linear", "saturate")
+FUTURE_POS_MODES = ("learned_zero", "sinusoidal")
+
+
 def count_parameters(model):
     return sum(param.numel() for param in model.parameters() if param.requires_grad)
+
+
+def build_residual_ramp(pred_len, mode="linear", saturate_frames=5):
+    """首帧恒为 0 保证连续；linear 平均只放行 50% 残差，saturate 在 saturate_frames 帧后全额放行。"""
+    pred_len = int(pred_len)
+    if mode == "linear":
+        ramp = torch.linspace(0.0, 1.0, pred_len)
+    elif mode == "saturate":
+        ramp = (torch.arange(pred_len, dtype=torch.float32) / float(saturate_frames)).clamp(max=1.0)
+    else:
+        raise ValueError("ramp_mode 必须是 {}，当前为 {}".format(RAMP_MODES, mode))
+    return ramp.view(1, pred_len, 1, 1, 1)
+
+
+def build_sinusoidal_position(seq_len, dim):
+    """固定多频正弦编码，让解码器从初始化起就能区分未来各帧、表达周期性输出。"""
+    position = torch.arange(int(seq_len), dtype=torch.float32).unsqueeze(1)
+    div_term = torch.exp(torch.arange(0, int(dim), 2, dtype=torch.float32) * (-math.log(10000.0) / float(dim)))
+    encoding = torch.zeros(int(seq_len), int(dim))
+    encoding[:, 0::2] = torch.sin(position * div_term)
+    encoding[:, 1::2] = torch.cos(position * div_term)
+    return encoding.unsqueeze(1)
 
 
 def _normalize_action(action, batch_size, num_actions, device):
@@ -57,6 +84,9 @@ class NTU2PResidualRefinerXYZ(nn.Module):
         dropout=0.1,
         alpha=1.0,
         freeze_base=True,
+        ramp_mode="linear",
+        ramp_saturate_frames=5,
+        future_pos_mode="learned_zero",
     ):
         super(NTU2PResidualRefinerXYZ, self).__init__()
         if not isinstance(base_model, NTULabelXYZTransformer):
@@ -81,6 +111,26 @@ class NTU2PResidualRefinerXYZ(nn.Module):
         self.dim_feedforward = int(dim_feedforward)
         self.dropout = float(dropout)
         self.freeze_base = bool(freeze_base)
+        self.ramp_mode = str(ramp_mode)
+        self.ramp_saturate_frames = int(ramp_saturate_frames)
+        self.future_pos_mode = str(future_pos_mode)
+        if self.ramp_mode not in RAMP_MODES:
+            raise ValueError("ramp_mode 必须是 {}，当前为 {}".format(RAMP_MODES, self.ramp_mode))
+        if self.future_pos_mode not in FUTURE_POS_MODES:
+            raise ValueError("future_pos_mode 必须是 {}，当前为 {}".format(FUTURE_POS_MODES, self.future_pos_mode))
+        if self.ramp_mode == "saturate" and self.ramp_saturate_frames < 1:
+            raise ValueError("ramp_saturate_frames 必须 >= 1")
+        # 非持久 buffer：不进入 state_dict，旧 checkpoint 可原样加载。
+        self.register_buffer(
+            "ramp",
+            build_residual_ramp(self.pred_len, self.ramp_mode, self.ramp_saturate_frames),
+            persistent=False,
+        )
+        self.register_buffer(
+            "future_sin_pos",
+            build_sinusoidal_position(self.pred_len, self.latent_dim),
+            persistent=False,
+        )
 
         self.obs_input_proj = nn.Linear(self.person_dim, self.latent_dim)
         self.future_input_proj = nn.Linear(self.person_dim, self.latent_dim)
@@ -148,6 +198,9 @@ class NTU2PResidualRefinerXYZ(nn.Module):
                 ("dim_feedforward", self.dim_feedforward),
                 ("dropout", self.dropout),
                 ("base_model_config", self.base_model.config()),
+                ("ramp_mode", self.ramp_mode),
+                ("ramp_saturate_frames", self.ramp_saturate_frames),
+                ("future_pos_mode", self.future_pos_mode),
                 ("architecture", "frozen_single_person_base_plus_cross_person_residual"),
                 ("base_frozen_by_default", True),
             ]
@@ -207,20 +260,16 @@ class NTU2PResidualRefinerXYZ(nn.Module):
             self.future_pos,
             token_type=self.base_type,
         )
+        if self.future_pos_mode == "sinusoidal":
+            future_a = future_a + self.future_sin_pos
+            future_b = future_b + self.future_sin_pos
         future_a = self.future_norm(future_a)
         future_b = self.future_norm(future_b)
         decoded_a, decoded_b = self.future_decoder(future_a, future_b, memory=memory)
         delta_a = self._tokens_to_xyz(decoded_a, batch_size)
         delta_b = self._tokens_to_xyz(decoded_b, batch_size)
         delta = torch.cat((delta_a, delta_b), dim=2)
-        ramp = torch.linspace(
-            0.0,
-            1.0,
-            self.pred_len,
-            dtype=delta.dtype,
-            device=delta.device,
-        ).view(1, self.pred_len, 1, 1, 1)
-        delta = delta * ramp
+        delta = delta * self.ramp.to(dtype=delta.dtype)
         pred_xyz = base_xyz + self.alpha * delta
         check_ntu_xyz("pred_xyz", pred_xyz, seq_len=self.pred_len, num_persons=2)
         if return_details:
@@ -271,6 +320,9 @@ def load_ntu2p_residual_refiner_checkpoint(path, device):
         dropout=model_config.get("dropout", 0.1),
         alpha=1.0,
         freeze_base=True,
+        ramp_mode=model_config.get("ramp_mode", "linear"),
+        ramp_saturate_frames=model_config.get("ramp_saturate_frames", 5),
+        future_pos_mode=model_config.get("future_pos_mode", "learned_zero"),
     )
     model.load_state_dict(state["model_state_dict"])
     model.to(device)

@@ -31,7 +31,7 @@
 
 ## 解释边界
 
-- InterHuman 本地 actor/reactor 顺序标签不是动作语义类别，不能当作“握手”等动作监督。
+- InterHuman 本地 actor/reactor 顺序标签不是动作语义类别，不能当作"握手"等动作监督。
 - 不声称 multi-person forecasting、interaction-aware 或 explicit relation 首创；relation-aware 只按已有同口径实验的相对收益表述。
 - 历史 CMDM、旧 NTU120 长窗口和单 skeleton 视频记录已归档，不作为当前协议或结论；压缩前入口全文见 `docs/ai/context/20260822-100457-agents-content-archive.md`。
 - 20260822 已按用户授权清理 `save/**/*.pt` 权重与 checkpoint，保留配置、指标、日志和诊断文件；执行记录见 `docs/ai/context/20260822-205033-save-weight-cleanup-plan.md`。

@@ -26,6 +26,8 @@ from utils.ntu_2p_rot6d import ntu_2p_rot6d_to_xyz
 from utils.ntu_smplx_2p_xyz import (
     acceleration_with_last_obs,
     check_ntu_xyz,
+    copy_last_xyz,
+    dct_band_energies,
     horizon_slices,
     interaction_pair_distances,
     local_pose,
@@ -35,6 +37,24 @@ from utils.ntu_smplx_2p_xyz import (
 
 
 DATASET = "ntu120_2p"
+
+# 顺序即求和顺序；改变顺序会改变浮点结果，破坏与历史 run 的逐位等价。
+LOSS_TERM_KEYS = (
+    "mse",
+    "mae",
+    "root",
+    "local",
+    "velocity",
+    "acceleration",
+    "long",
+    "final",
+    "inter",
+    "local_velocity",
+    "articulation_energy",
+    "temporal_std",
+    "dct_low_amplitude",
+    "dct_mid_amplitude",
+)
 
 
 def _utc_now():
@@ -96,33 +116,114 @@ def _batch_xyz(batch, converter, device):
     return obs_xyz, target_xyz, action
 
 
-def _loss_terms(pred, delta, target, obs, args):
-    loss = torch.nn.functional.mse_loss(pred, target)
-    loss = loss + float(args.mae_loss_weight) * torch.nn.functional.l1_loss(pred, target)
-    if args.root_loss_weight > 0:
-        loss = loss + float(args.root_loss_weight) * torch.nn.functional.mse_loss(root_positions(pred), root_positions(target))
-    if args.local_pose_loss_weight > 0:
-        loss = loss + float(args.local_pose_loss_weight) * torch.nn.functional.mse_loss(local_pose(pred), local_pose(target))
-    if args.velocity_loss_weight > 0:
-        loss = loss + float(args.velocity_loss_weight) * torch.nn.functional.mse_loss(
-            velocity_with_last_obs(pred, obs), velocity_with_last_obs(target, obs)
-        )
-    if args.acceleration_loss_weight > 0:
-        loss = loss + float(args.acceleration_loss_weight) * torch.nn.functional.mse_loss(
-            acceleration_with_last_obs(pred, obs), acceleration_with_last_obs(target, obs)
-        )
+def _local_pose_velocity_with_last_obs(value, obs):
+    full = torch.cat((obs[:, -1:], value), dim=1)
+    pose = local_pose(full)
+    return pose[:, 1:] - pose[:, :-1]
+
+
+def _articulation_energy(value, obs):
+    # 每个 (person, joint) 的局部姿态帧间摆动能量，对时间取均值后与相位无关，用于对抗均值坍缩。
+    velocity = _local_pose_velocity_with_last_obs(value, obs)
+    return (velocity * velocity).sum(dim=-1).mean(dim=1)
+
+
+def _term_weights(args):
+    return OrderedDict(
+        [
+            ("mse", 1.0),
+            ("mae", float(args.mae_loss_weight)),
+            ("root", float(args.root_loss_weight)),
+            ("local", float(args.local_pose_loss_weight)),
+            ("velocity", float(args.velocity_loss_weight)),
+            ("acceleration", float(args.acceleration_loss_weight)),
+            ("long", float(args.long_loss_weight)),
+            ("final", float(args.final_frame_loss_weight)),
+            ("inter", float(args.inter_loss_weight)),
+            ("local_velocity", float(getattr(args, "local_velocity_loss_weight", 0.0))),
+            ("articulation_energy", float(getattr(args, "articulation_energy_loss_weight", 0.0))),
+            ("temporal_std", float(getattr(args, "temporal_std_loss_weight", 0.0))),
+            ("dct_low_amplitude", float(getattr(args, "dct_low_amplitude_loss_weight", 0.0))),
+            ("dct_mid_amplitude", float(getattr(args, "dct_mid_amplitude_loss_weight", 0.0))),
+        ]
+    )
+
+
+def _raw_terms(pred, target, obs, args, keys):
+    mse = torch.nn.functional.mse_loss
     _, _, long_slice = horizon_slices(args.pred_len)
-    if args.long_loss_weight > 0:
-        loss = loss + float(args.long_loss_weight) * torch.nn.functional.mse_loss(pred[:, long_slice], target[:, long_slice])
-    if args.final_frame_loss_weight > 0:
-        loss = loss + float(args.final_frame_loss_weight) * torch.nn.functional.mse_loss(pred[:, -1], target[:, -1])
-    if args.inter_loss_weight > 0:
-        pred_dist = interaction_pair_distances(pred)
-        target_dist = interaction_pair_distances(target)
-        loss = loss + float(args.inter_loss_weight) * torch.nn.functional.mse_loss(pred_dist, target_dist)
+    terms = OrderedDict()
+    for key in keys:
+        if key == "mse":
+            terms[key] = mse(pred, target)
+        elif key == "mae":
+            terms[key] = torch.nn.functional.l1_loss(pred, target)
+        elif key == "root":
+            terms[key] = mse(root_positions(pred), root_positions(target))
+        elif key == "local":
+            terms[key] = mse(local_pose(pred), local_pose(target))
+        elif key == "velocity":
+            terms[key] = mse(velocity_with_last_obs(pred, obs), velocity_with_last_obs(target, obs))
+        elif key == "acceleration":
+            terms[key] = mse(acceleration_with_last_obs(pred, obs), acceleration_with_last_obs(target, obs))
+        elif key == "long":
+            terms[key] = mse(pred[:, long_slice], target[:, long_slice])
+        elif key == "final":
+            terms[key] = mse(pred[:, -1], target[:, -1])
+        elif key == "inter":
+            terms[key] = mse(interaction_pair_distances(pred), interaction_pair_distances(target))
+        elif key == "local_velocity":
+            terms[key] = mse(_local_pose_velocity_with_last_obs(pred, obs), _local_pose_velocity_with_last_obs(target, obs))
+        elif key == "articulation_energy":
+            terms[key] = mse(_articulation_energy(pred, obs), _articulation_energy(target, obs))
+        elif key == "temporal_std":
+            # 幅度型（开根号）损失：能量型在 Δ≈0 处梯度消失，幅度型梯度不消失（Stage 1 诊断）。
+            terms[key] = mse(local_pose(pred).std(dim=1), local_pose(target).std(dim=1))
+        elif key in ("dct_low_amplitude", "dct_mid_amplitude"):
+            band = key.split("_")[1]
+            eps = float(getattr(args, "amplitude_eps", 1e-6))
+            pred_amplitude = torch.sqrt(dct_band_energies(pred)[band] + eps)
+            target_amplitude = torch.sqrt(dct_band_energies(target)[band] + eps)
+            terms[key] = mse(pred_amplitude, target_amplitude)
+        else:
+            raise ValueError("未知 loss 项: {}".format(key))
+    return terms
+
+
+def _loss_terms(pred, delta, target, obs, args, scales=None):
+    """scales 为 None 时与历史实现逐位等价；否则每项除以 copy-last 在训练集上的同名误差。"""
+    weights = _term_weights(args)
+    active = [key for key in LOSS_TERM_KEYS if weights[key] > 0]
+    terms = _raw_terms(pred, target, obs, args, active)
+    loss = None
+    for key in active:
+        term = terms[key] if scales is None else terms[key] / float(scales[key])
+        loss = weights[key] * term if loss is None else loss + weights[key] * term
     delta_reg = (delta * delta).mean()
     loss = loss + float(args.delta_reg_weight) * delta_reg
     return loss, delta_reg
+
+
+def _estimate_copy_last_scales(args, converter, device):
+    """以 copy-last 的各项训练集误差作归一化常量，使每个 loss 项都表示'相对 copy-last 的比例'。"""
+    dataset = _dataset(args, "train")
+    loader = _loader(args, dataset, shuffle=False)
+    sums = OrderedDict((key, 0.0) for key in LOSS_TERM_KEYS)
+    count = 0
+    with torch.no_grad():
+        for index, batch in enumerate(loader):
+            if args.scale_estimate_batches > 0 and index >= args.scale_estimate_batches:
+                break
+            obs_xyz, target_xyz, _ = _batch_xyz(batch, converter, device)
+            copy_xyz = copy_last_xyz(obs_xyz, args.pred_len)
+            terms = _raw_terms(copy_xyz, target_xyz, obs_xyz, args, LOSS_TERM_KEYS)
+            batch_size = int(obs_xyz.shape[0])
+            for key, value in terms.items():
+                sums[key] += float(value.detach().cpu().item()) * batch_size
+            count += batch_size
+    if count <= 0:
+        raise ValueError("归一化常量估计样本数为 0")
+    return OrderedDict((key, max(value / float(count), 1e-8)) for key, value in sums.items())
 
 
 def _save_checkpoint(args, model, optimizer, step):
@@ -184,8 +285,14 @@ def run(args):
         dropout=args.dropout,
         alpha=1.0,
         freeze_base=not args.unfreeze_base,
+        ramp_mode=args.ramp_mode,
+        ramp_saturate_frames=args.ramp_saturate_frames,
+        future_pos_mode=args.future_pos_mode,
     ).to(device)
     converter = Rotation2xyz_x(device=device, dataset="ntu120_2p")
+    # 用独立的数据集实例估计常量，避免消耗训练集的随机窗口采样流。
+    loss_scales = _estimate_copy_last_scales(args, converter, device) if args.loss_scale_normalize else None
+    args.loss_scales = loss_scales
     optimizer = AdamW(
         [param for param in model.parameters() if param.requires_grad],
         lr=args.lr,
@@ -215,7 +322,7 @@ def run(args):
             model.train()
             obs_xyz, target_xyz, action = _batch_xyz(batch, converter, device)
             pred, base, delta = model(obs_xyz, action, return_details=True)
-            loss, delta_reg = _loss_terms(pred, delta, target_xyz, obs_xyz, args)
+            loss, delta_reg = _loss_terms(pred, delta, target_xyz, obs_xyz, args, scales=loss_scales)
             if not torch.isfinite(loss):
                 raise ValueError("训练 loss 非有限")
             optimizer.zero_grad()
@@ -281,6 +388,18 @@ def build_arg_parser():
     parser.add_argument("--final_frame_loss_weight", type=float, default=0.2)
     parser.add_argument("--delta_reg_weight", type=float, default=0.01)
     parser.add_argument("--inter_loss_weight", type=float, default=0.0)
+    # 以下为摆动恢复实验新增项，默认值均保持历史行为。
+    parser.add_argument("--local_velocity_loss_weight", type=float, default=0.0)
+    parser.add_argument("--articulation_energy_loss_weight", type=float, default=0.0)
+    parser.add_argument("--temporal_std_loss_weight", type=float, default=0.0)
+    parser.add_argument("--dct_low_amplitude_loss_weight", type=float, default=0.0)
+    parser.add_argument("--dct_mid_amplitude_loss_weight", type=float, default=0.0)
+    parser.add_argument("--amplitude_eps", type=float, default=1e-6)
+    parser.add_argument("--loss_scale_normalize", action="store_true")
+    parser.add_argument("--scale_estimate_batches", type=int, default=0, help="0 表示遍历整个训练集")
+    parser.add_argument("--ramp_mode", choices=("linear", "saturate"), default="linear")
+    parser.add_argument("--ramp_saturate_frames", type=int, default=5)
+    parser.add_argument("--future_pos_mode", choices=("learned_zero", "sinusoidal"), default="learned_zero")
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--clip_grad_norm", type=float, default=1.0)
