@@ -43,7 +43,7 @@ pred = base + gate * delta
 - 输出为 `delta_A/delta_B`，形状与 future xyz 相同。
 - 使用共享输入/输出投影和共享 cross-person 参数，避免收益来自 A/B 专属参数量。
 - `delta[:, 0] = 0`，不允许修正首帧。
-- 输出：`pred = base + alpha * delta`；`alpha` 是共享标量并精确初始化为 0，使模型初始输出逐元素等于 baseline。首版不把 `alpha` 过 sigmoid，避免有限值 sigmoid 永远无法达到严格的 0；后续若出现过度修正，再单独评估有界参数化。实现中保留 `alpha=0` 的确定性回归测试。
+- 输出：`pred = base + alpha * delta`；最终 `delta_head` 的 weight/bias 零初始化，`alpha` 初始化为 1，使模型初始输出逐元素等于 baseline，同时保留残差 head 的有效梯度。首版不把 `alpha` 过 sigmoid，避免有限值 sigmoid 永远无法达到严格的 0；后续若出现过度修正，再单独评估有界参数化。实现中保留 `alpha=0` 的确定性回归测试。
 
 ### 2.4 损失
 
