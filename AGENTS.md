@@ -46,4 +46,4 @@
 - 阶段性设计、实验和结果：`docs/ai/context/` 下按时间戳文件
 - 本次压缩计划与结果：`docs/ai/context/20260822-100457-agents-slimming-plan.md`、`docs/ai/context/20260822-100457-agents-slimming-result.md`
 - 20260902 摆动恢复工作的文档索引、CLAUDE.md 建立、PR #1 合并与仓库同步记录：`docs/ai/context/20260902-221812-claude-md-setup-and-articulation-recovery-pr-sync-result.md`
-- CLAUDE.md 软链接、本机 Claude 审查 + PR 自动合并 CI、本地 main 同步脚本：设计 `docs/ai/context/20260924-104641-claude-md-symlink-and-pr-auto-merge-design-and-plan.md`，实现与验证 `docs/ai/context/20260924-105223-claude-md-symlink-and-pr-auto-merge-result.md`
+- CLAUDE.md 软链接、本机 Claude 审查 + PR 自动合并 CI、本地 main 同步脚本：设计 `docs/ai/context/20260924-104641-claude-md-symlink-and-pr-auto-merge-design-and-plan.md`，实现与验证 `docs/ai/context/20260924-105223-claude-md-symlink-and-pr-auto-merge-result.md`，端到端结果 `docs/ai/context/20260924-105858-pr-auto-merge-pipeline-e2e-result.md`
