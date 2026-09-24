@@ -1,11 +1,15 @@
 # ReGenNet AI 入口
 
+> **只修改 `AGENTS.md`。** `CLAUDE.md` 是指向本文件的软链接（Claude Code 读 `CLAUDE.md`，Codex 等读 `AGENTS.md`，内容是同一份）；不要编辑、删除或替换 `CLAUDE.md`。
+
 ## 稳定约束
 
 - 默认使用中文；文档、计划、总结和代码注释均使用中文，除非用户明确要求英文。
 - 实现前必须先完成 design / plan；把上下文、决策、取舍和结果写入 `docs/ai/context/`。
 - 新增上下文只创建 `YYYYMMDD-HHMMSS-文件名.md`，不覆写、重命名或删除历史文件。
 - 代码注释写原因，不写过程；优先函数式、复用现有模块，保持 KISS/DRY。
+- `CLAUDE.md` 是指向 `AGENTS.md` 的软链接，只维护 `AGENTS.md`；CI 会拦截把它替换成普通文件的 PR。
+- 代码提交：在 feature 分支提交后运行 `python3 scripts/ship_pr.py`（本机 Claude Code 审查 → 推送并向 `fork`（cnYui/ReGenNet）建 PR → CI 约定检查通过后自动 merge 并删除远端分支 → 本地 `main` 快进、删除已合并分支）；只同步本地用 `python3 scripts/ship_pr.py sync`。`origin` 为原作者仓库，不提交。本地 `main` 上游为 `fork/main`。
 
 ## 当前研究入口
 
@@ -41,3 +45,5 @@
 - 长期项目记忆：`docs/ai/context/20260614-185753-regennet-key-context-extracted-from-agents.md`
 - 阶段性设计、实验和结果：`docs/ai/context/` 下按时间戳文件
 - 本次压缩计划与结果：`docs/ai/context/20260822-100457-agents-slimming-plan.md`、`docs/ai/context/20260822-100457-agents-slimming-result.md`
+- 20260902 摆动恢复工作的文档索引、CLAUDE.md 建立、PR #1 合并与仓库同步记录：`docs/ai/context/20260902-221812-claude-md-setup-and-articulation-recovery-pr-sync-result.md`
+- CLAUDE.md 软链接、本机 Claude 审查 + PR 自动合并 CI、本地 main 同步脚本：设计 `docs/ai/context/20260924-104641-claude-md-symlink-and-pr-auto-merge-design-and-plan.md`，实现与验证 `docs/ai/context/20260924-105223-claude-md-symlink-and-pr-auto-merge-result.md`

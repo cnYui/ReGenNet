@@ -1,0 +1,75 @@
+# PR 门槛 = 确定性约定检查 + 本机 Claude Code 审查结论（commit status），两者都通过才自动合并。
+# 审查在本机由 scripts/ship_pr.py 用 Claude Code 登录态完成，云端不需要任何 API key。
+name: PR 检查与自动合并
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# 同一 PR 有新推送时取消旧 run，避免旧提交的检查结果触发合并
+concurrency:
+  group: pr-auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  RUFF_VERSION: "0.16.8"
+  REVIEW_CONTEXT: claude-review # 与 scripts/ship_pr.py 的 STATUS_CONTEXT 保持一致
+
+jobs:
+  checks:
+    name: 约定检查
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # 需要 merge-base 及其版本的文件，才能只拦截本 PR 新引入的问题
+      - name: 安装 ruff
+        run: pipx install "ruff==${RUFF_VERSION}"
+      - name: 运行约定检查
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/check_repo_conventions.py --base "$BASE_SHA" --head "$HEAD_SHA"
+
+  merge:
+    name: 自动合并
+    needs: checks
+    # 只合并仓库所有者从本仓库分支发起的非草稿 PR；外部 fork 的 PR 只跑检查。草稿 PR 用于"暂不合并"
+    if: >-
+      !github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == github.repository_owner
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      statuses: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: 确认本机 Claude Code 审查已通过
+        # 向已有 PR 推送时，CI 会在脚本补打 status 之前启动，因此轮询最多 5 分钟
+        run: |
+          for _ in $(seq 20); do
+            state=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/status" \
+              --jq "[.statuses[] | select(.context == \"$REVIEW_CONTEXT\")][0].state // \"missing\"")
+            echo "$REVIEW_CONTEXT: $state"
+            case "$state" in
+              success) exit 0 ;;
+              failure | error) echo "::error::本机审查未通过"; exit 1 ;;
+            esac
+            sleep 15
+          done
+          echo "::error::5 分钟内未收到 $REVIEW_CONTEXT 状态，请在本机用 python3 scripts/ship_pr.py 提交"
+          exit 1
+      - name: 合并并删除远端分支
+        # merge commit 与已有历史一致，本地 git 也能据此判定分支已合并；--match-head-commit 防止检查后又被推入新提交
+        run: gh pr merge "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --merge --delete-branch --match-head-commit "$HEAD_SHA"
