@@ -47,6 +47,14 @@ claude -p <审查提示> --output-format json --json-schema <verdict/summary/fin
 | minor | 审查缓存只以 head SHA 为 key，`fork/main` 前进后审查范围已变却会复用旧结论 | key 改为 head + merge-base |
 | minor | 设计文档第 7 条写 `git branch -d`，实现为先 `merge-base --is-ancestor` 确认已并入 main 再 `git branch -D`（避免 `-d` 按当前 HEAD 判断而误拒） | 以实现为准，在此注明；设计文档作为历史记录不改 |
 
+对修正后的提交 `785bf61` 再次审查：结论"通过"，1 个 major、2 个 minor：
+
+| 级别 | 问题 | 处理 |
+|---|---|---|
+| major | 已有 PR 的 CI 失败后 `rerun_failed_run` 触发重跑，随即轮询；重跑生效前 `gh pr checks` 仍返回上次失败，会误报退出且不 sync | 重跑后轮询 `gh run view` 直到该 run 不再是 `completed`（最多 60 秒）再进入等待 |
+| minor | checks job 运行 PR head 版本的检查脚本，PR 可同时放宽规则 | 接受：只自动合并仓库所有者的同仓库 PR，所有者本就可直接改 `main`，不构成越权；如需防自我放宽，可改为从 base SHA 取检查脚本 |
+| minor | 同批入库的 `20260902-221812-...-pr-sync-result.md` 记载的"CLAUDE.md 全文复制、两份保持一致"约定已被本次软链接方案取代 | 在此注明：**该约定自 20260924 起失效**，以 `AGENTS.md` 稳定约束中的软链接规则为准；历史文件不改 |
+
 ## 五、基线与已知限制
 
 - 全仓 ruff 基线 13 处 F821，均在上游遗留文件（`actor-x/src/evaluate/tables/easy_table_A2M.py`、`actor-x/src/models/modeltype/kgan.py`、`data_loaders/humanml/motion_loaders/model_motion_loaders.py`、`model/transformer_utils.py`）；按设计只拦截新增问题，未修改这些文件。

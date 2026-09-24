@@ -187,7 +187,14 @@ def rerun_failed_run(slug: str, sha: str) -> None:
     runs = json.loads(run("gh", "run", "list", "--repo", slug, "--workflow", WORKFLOW_FILE, "--commit", sha,
                           "--json", "databaseId,status,conclusion", "--limit", "1") or "[]")
     if runs and runs[0]["status"] == "completed" and runs[0]["conclusion"] != "success":
-        run_visible("gh", "run", "rerun", str(runs[0]["databaseId"]), "--repo", slug)
+        run_id = str(runs[0]["databaseId"])
+        run_visible("gh", "run", "rerun", run_id, "--repo", slug)
+        # 重跑生效前 gh pr checks 仍返回上次的失败结果，等 run 重新排队后再开始轮询，避免误判
+        for _ in range(12):
+            if run("gh", "run", "view", run_id, "--repo", slug, "--json", "status", "--jq", ".status") != "completed":
+                return
+            time.sleep(5)
+        raise ShipError(f"已请求重跑 run {run_id}，但 60 秒内未开始；请在 GitHub 上确认")
 
 
 def check_buckets(slug: str, pr: str) -> Dict[str, str]:
