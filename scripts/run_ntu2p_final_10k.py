@@ -41,6 +41,8 @@ def _evaluate_test(checkpoint, dry_run):
     step = re.search(r"model(\d+)\.pt$", checkpoint).group(1)
     output = os.path.join(os.path.dirname(checkpoint), "eval_test_{}.json".format(step))
     if not os.path.exists(output):
+        if not dry_run and not os.path.exists(checkpoint):
+            raise FileNotFoundError("缺少权重且没有已有的 test 评估结果：{}".format(checkpoint))
         command = [
             sys.executable, "eval/eval_ntu2p_residual_refiner_xyz.py",
             "--manifest_path", MANIFEST, "--checkpoint", checkpoint, "--output", output,
@@ -79,9 +81,9 @@ def _mean_std_row(label, rows):
     return row
 
 
-def _split_rows(seed_results, reference_results):
-    seed_rows = [_variant_row("final_s{}_{}".format(seed, result["checkpoint_step"]), result) for seed, result in seed_results]
-    rows = seed_rows + [_mean_std_row("final mean ± std (n={})".format(len(seed_rows)), seed_rows)]
+def _split_rows(seed_results, reference_results, label="final"):
+    seed_rows = [_variant_row("{}_s{}_{}".format(label, seed, result["checkpoint_step"]), result) for seed, result in seed_results]
+    rows = seed_rows + [_mean_std_row("{} mean ± std (n={})".format(label, len(seed_rows)), seed_rows)]
     anchor = seed_results[0][1]
     rows.append(_variant_row("base (frozen independent)", anchor, "base"))
     rows.append(_variant_row("copy-last", anchor, "copy_last"))
@@ -92,9 +94,9 @@ def _split_rows(seed_results, reference_results):
     return rows
 
 
-def _write_final(tables):
-    os.makedirs(SUMMARY_DIR, exist_ok=True)
-    with open(os.path.join(SUMMARY_DIR, "final.json"), "w") as handle:
+def _write_final(tables, summary_dir=SUMMARY_DIR):
+    os.makedirs(summary_dir, exist_ok=True)
+    with open(os.path.join(summary_dir, "final.json"), "w") as handle:
         json.dump(tables, handle, indent=2, ensure_ascii=False)
         handle.write("\n")
     header = ["run"] + list(L2_KEYS) + ["mpjpe_vs_base", "mpjpe_vs_copy_last"] + [name for name, _ in ARTIC_KEYS] + ["full_gate"]
@@ -108,7 +110,7 @@ def _write_final(tables):
                 cells.append("{:.5f}".format(value) if isinstance(value, float) else str(value))
             lines.append("| " + " | ".join(cells) + " |")
         lines.append("")
-    with open(os.path.join(SUMMARY_DIR, "final.md"), "w") as handle:
+    with open(os.path.join(summary_dir, "final.md"), "w") as handle:
         handle.write("\n".join(lines))
 
 
