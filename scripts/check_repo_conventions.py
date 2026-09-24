@@ -3,7 +3,8 @@
 
 检查 base...head（以 merge-base 为起点）之间的改动：
 1. CLAUDE.md 必须是指向 AGENTS.md 的软链接；
-2. docs/ai/context/ 历史文件只增不改，新增 .md 必须命名为 YYYYMMDD-HHMMSS-名称.md；
+2. docs/ai/context/ 历史文件不得修改；可以删除（每日清理由 scripts/prune_ai_context.py 执行），
+   但删除后不得留下悬空引用；新增 .md 必须命名为 YYYYMMDD-HHMMSS-名称.md；
 3. 改动的 .py 文件不得新增 ruff 问题（目标 Python 3.7）。
 
 用法：python3 scripts/check_repo_conventions.py --base fork/main [--head HEAD] [--ruff ruff | --skip-python]
@@ -20,7 +21,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Counter, List, Optional, Tuple
+from typing import Counter, Dict, List, Optional, Tuple
 
 CONTEXT_DIR = "docs/ai/context/"
 CONTEXT_MD_NAME = re.compile(r"^\d{8}-\d{6}-[^/]+\.md$")
@@ -64,16 +65,39 @@ def check_claude_symlink(head: str) -> List[str]:
             "请把改动合并进 AGENTS.md，再执行 ln -sfn AGENTS.md CLAUDE.md"]
 
 
-def check_context_docs(changes: List[Change]) -> List[str]:
+def dangling_references(head: str, names: List[str]) -> Dict[str, List[str]]:
+    """返回 head 树中仍引用这些文件名的文件；与 prune_ai_context.py 一样按文件名子串匹配。"""
+    if not names:
+        return {}
+    patterns = [arg for name in names for arg in ("-e", name)]
+    proc = subprocess.run(["git", "-c", "core.quotePath=false", "grep", "-I", "-o", "-F", *patterns, head, "--"],
+                          capture_output=True, text=True)
+    if proc.returncode not in (0, 1):  # 1 表示没有匹配
+        raise RuntimeError(f"git grep 失败：{proc.stderr.strip()}")
+    found: Dict[str, List[str]] = {}
+    for line in proc.stdout.splitlines():
+        path, name = line[len(head) + 1:].rsplit(":", 1)  # 输出格式为 <head>:<路径>:<匹配>
+        if path not in found.setdefault(name, []):
+            found[name].append(path)
+    return found
+
+
+def check_context_docs(changes: List[Change], head: str) -> List[str]:
+    """changes 须按 --no-renames 取得：改名即"删除 + 新增"，两半分别受约束。"""
     errors = []
-    for status, old, new in changes:
-        if old.startswith(CONTEXT_DIR) and status != "A":
-            action = {"M": "修改", "D": "删除", "R": "重命名", "T": "改变类型"}.get(status, status)
-            errors.append(f"{CONTEXT_DIR} 历史文件只增不改，本 PR {action}了 {old}"
-                          + (f" → {new}" if new != old else ""))
-        if (new.startswith(CONTEXT_DIR) and status in "ARC" and new.endswith(".md")
-                and not CONTEXT_MD_NAME.match(new[len(CONTEXT_DIR):])):
-            errors.append(f"新增 context 文档必须命名为 YYYYMMDD-HHMMSS-名称.md：{new}")
+    deleted = []
+    for status, path, _ in changes:
+        if not path.startswith(CONTEXT_DIR):
+            continue
+        if status == "D":
+            deleted.append(path[len(CONTEXT_DIR):])
+        elif status != "A":
+            action = {"M": "修改", "T": "改变类型"}.get(status, status)
+            errors.append(f"{CONTEXT_DIR} 历史文件不得修改，本 PR {action}了 {path}")
+        elif path.endswith(".md") and not CONTEXT_MD_NAME.match(path[len(CONTEXT_DIR):]):
+            errors.append(f"新增 context 文档必须命名为 YYYYMMDD-HHMMSS-名称.md：{path}")
+    for name, paths in sorted(dangling_references(head, deleted).items()):
+        errors.append(f"删除了 {CONTEXT_DIR}{name}，但它仍被引用：{', '.join(paths)}")
     return errors
 
 
@@ -115,7 +139,10 @@ def run_checks(base: str, head: str = "HEAD", ruff: Optional[str] = None) -> Lis
     """返回全部违规信息；ruff 为 None 时跳过 Python 检查（本地未安装 ruff 时由 CI 兜底）。"""
     merge_base = git("merge-base", base, head).strip()
     changes = parse_name_status(git("diff", "--name-status", "-M", "-z", merge_base, head))
-    errors = check_claude_symlink(head) + check_context_docs(changes)
+    # 清理删除的旧文档与新增归档可能被相似度判成改名，context 部分按不识别改名比较
+    context_changes = parse_name_status(git("diff", "--name-status", "--no-renames", "-z",
+                                            merge_base, head, "--", CONTEXT_DIR))
+    errors = check_claude_symlink(head) + check_context_docs(context_changes, head)
     if ruff is not None:
         errors += check_python(ruff, merge_base, head, changes)
     return errors

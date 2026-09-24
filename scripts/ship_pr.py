@@ -130,6 +130,29 @@ def main_remote() -> str:
     return upstream.split("/", 1)[0]
 
 
+def ask_claude(prompt: str, schema: Dict[str, object], tools: List[str], allowed: List[str],
+               cwd: str, timeout_s: int, what: str) -> Dict[str, object]:
+    """用本机 claude -p 执行一次结构化任务；dontAsk 下白名单外的工具一律拒绝，不会停下来等人确认。"""
+    if shutil.which("claude") is None:
+        raise ShipError("找不到 claude 命令，请先安装并登录 Claude Code CLI")
+    try:
+        proc = subprocess.run(
+            ["claude", "-p", prompt, "--output-format", "json", "--json-schema", json.dumps(schema),
+             "--tools", ",".join(tools), "--allowedTools", ",".join(allowed),
+             "--permission-mode", "dontAsk", "--strict-mcp-config", "--no-session-persistence"],
+            capture_output=True, text=True, timeout=timeout_s, cwd=cwd)
+    except subprocess.TimeoutExpired:
+        raise ShipError(f"{what}超过 {timeout_s // 60} 分钟未完成") from None
+    try:
+        result = json.loads(proc.stdout)
+    except ValueError:
+        raise ShipError(f"{what}输出无法解析（exit={proc.returncode}）：{(proc.stderr or proc.stdout)[:500]}") from None
+    output = result.get("structured_output")
+    if result.get("is_error") or not isinstance(output, dict):
+        raise ShipError(f"{what}失败：{str(result.get('result'))[:500]}")
+    return output
+
+
 def review_branch(remote: str) -> Tuple[str, Dict[str, object]]:
     run("git", "fetch", remote, MAIN)
     base = f"{remote}/{MAIN}"
@@ -147,27 +170,9 @@ def review_branch(remote: str) -> Tuple[str, Dict[str, object]]:
         print(f"复用该提交已有的审查结论：{cache}")
         print(render_review(review, head))
         return head, review
-    if shutil.which("claude") is None:
-        raise ShipError("找不到 claude 命令，请先安装并登录 Claude Code CLI")
-
     print(f"本机 Claude Code 审查中（{base}...{head[:8]}），通常需要几分钟 …", flush=True)
-    try:
-        proc = subprocess.run(
-            ["claude", "-p", REVIEW_PROMPT.format(base=base),
-             "--output-format", "json", "--json-schema", json.dumps(REVIEW_SCHEMA),
-             "--tools", ",".join(REVIEW_TOOLS), "--allowedTools", ",".join(REVIEW_ALLOWED),
-             "--permission-mode", "dontAsk", "--strict-mcp-config", "--no-session-persistence"],
-            capture_output=True, text=True, timeout=REVIEW_TIMEOUT_S,
-            cwd=run("git", "rev-parse", "--show-toplevel"))
-    except subprocess.TimeoutExpired:
-        raise ShipError(f"审查超过 {REVIEW_TIMEOUT_S // 60} 分钟未完成") from None
-    try:
-        result = json.loads(proc.stdout)
-    except ValueError:
-        raise ShipError(f"审查输出无法解析（exit={proc.returncode}）：{(proc.stderr or proc.stdout)[:500]}") from None
-    review = result.get("structured_output")
-    if result.get("is_error") or not isinstance(review, dict):
-        raise ShipError(f"审查失败：{str(result.get('result'))[:500]}")
+    review = ask_claude(REVIEW_PROMPT.format(base=base), REVIEW_SCHEMA, REVIEW_TOOLS, REVIEW_ALLOWED,
+                        cwd=run("git", "rev-parse", "--show-toplevel"), timeout_s=REVIEW_TIMEOUT_S, what="审查")
 
     # 留存原始结论，便于复用和事后对照 PR 评论
     cache.parent.mkdir(exist_ok=True)
@@ -233,6 +238,18 @@ def wait_for_merge(slug: str, pr: str) -> None:
         time.sleep(POLL_S)
 
 
+def parse_worktree_branches(porcelain: str) -> Dict[str, str]:
+    """解析 `git worktree list --porcelain`，返回 {分支名: 检出它的工作树路径}。"""
+    branches = {}
+    path = ""
+    for line in porcelain.splitlines():
+        if line.startswith("worktree "):
+            path = line[len("worktree "):]
+        elif line.startswith("branch refs/heads/"):
+            branches[line[len("branch refs/heads/"):]] = path
+    return branches
+
+
 def is_merged_into_main(branch: str) -> bool:
     return subprocess.run(["git", "merge-base", "--is-ancestor", branch, MAIN]).returncode == 0
 
@@ -243,11 +260,22 @@ def sync(remote: str) -> None:
     dirty = tracked_dirty()
     gone = parse_gone_branches(run("git", "for-each-ref", "--format=%(refname:short) %(upstream:track)",
                                    "refs/heads"))
+    here = run("git", "rev-parse", "--show-toplevel")
+    # git 拒绝在别的工作树里覆盖、切换到或删除已检出的分支，这些分支只能在所在工作树里处理
+    elsewhere = {name: path for name, path in
+                 parse_worktree_branches(run("git", "worktree", "list", "--porcelain")).items()
+                 if path != here}
     if branch == MAIN:
         if dirty:
             print("! 工作区有未提交的跟踪文件修改，main 未快进；提交或 stash 后重跑 sync")
             return
         run_visible("git", "merge", "--ff-only", f"{remote}/{MAIN}")
+    elif MAIN in elsewhere:
+        main_tree = elsewhere[MAIN]
+        if run("git", "-C", main_tree, "status", "--porcelain", "--untracked-files=no"):
+            print(f"! {main_tree} 有未提交的跟踪文件修改，其中的 {MAIN} 未快进；在那里提交或 stash 后重跑 sync")
+        else:
+            run_visible("git", "-C", main_tree, "merge", "--ff-only", f"{remote}/{MAIN}")
     else:
         # 不切分支也能快进 main 引用；非快进时 git 会拒绝，不会丢提交
         run_visible("git", "fetch", remote, f"{MAIN}:{MAIN}")
@@ -255,7 +283,11 @@ def sync(remote: str) -> None:
             run_visible("git", "switch", MAIN)
     for name in gone:
         if name == current_branch():
-            print(f"! 保留当前分支 {name}：远端分支已删除，但工作区有未提交修改或仍有提交未进入 {MAIN}")
+            reason = (f"{MAIN} 已在工作树 {elsewhere[MAIN]} 检出，无法在此切回" if MAIN in elsewhere
+                      else f"工作区有未提交修改或仍有提交未进入 {MAIN}")
+            print(f"! 保留当前分支 {name}（远端分支已删除）：{reason}")
+        elif name in elsewhere:
+            print(f"! 保留 {name}：已在工作树 {elsewhere[name]} 检出")
         elif is_merged_into_main(name):
             # 已确认全部提交都在 main 中，用 -D 避免 -d 按当前 HEAD 判断合并状态而误拒
             run_visible("git", "branch", "-D", name)

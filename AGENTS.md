@@ -6,7 +6,7 @@
 
 - 默认使用中文；文档、计划、总结和代码注释均使用中文，除非用户明确要求英文。
 - 实现前必须先完成 design / plan；把上下文、决策、取舍和结果写入 `docs/ai/context/`。
-- 新增上下文只创建 `YYYYMMDD-HHMMSS-文件名.md`，不覆写、重命名或删除历史文件。
+- 新增上下文只创建 `YYYYMMDD-HHMMSS-文件名.md`，不修改、不重命名历史文件；删除只由每日文档维护任务执行（`scripts/prune_ai_context.py`：文件名日期超过 15 天、且未被入口/仓库文件或其它保留文档引用、无 `<!-- prune:keep -->` 标记），需长期保留的文档要被入口引用或加该标记；被删文件可从 git 历史找回。
 - 代码注释写原因，不写过程；优先函数式、复用现有模块，保持 KISS/DRY。
 - `CLAUDE.md` 是指向 `AGENTS.md` 的软链接，只维护 `AGENTS.md`；CI 会拦截把它替换成普通文件的 PR。
 - 代码提交：在 feature 分支提交后运行 `python3 scripts/ship_pr.py`（本机 Claude Code 审查 → 推送并向 `fork`（cnYui/ReGenNet）建 PR → CI 约定检查通过后自动 merge 并删除远端分支 → 本地 `main` 快进、删除已合并分支）；只同步本地用 `python3 scripts/ship_pr.py sync`。`origin` 为原作者仓库，不提交。本地 `main` 上游为 `fork/main`。
@@ -47,3 +47,4 @@
 - 本次压缩计划与结果：`docs/ai/context/20260822-100457-agents-slimming-plan.md`、`docs/ai/context/20260822-100457-agents-slimming-result.md`
 - 20260902 摆动恢复工作的文档索引、CLAUDE.md 建立、PR #1 合并与仓库同步记录：`docs/ai/context/20260902-221812-claude-md-setup-and-articulation-recovery-pr-sync-result.md`
 - CLAUDE.md 软链接、本机 Claude 审查 + PR 自动合并 CI、本地 main 同步脚本：设计 `docs/ai/context/20260924-104641-claude-md-symlink-and-pr-auto-merge-design-and-plan.md`，实现与验证 `docs/ai/context/20260924-105223-claude-md-symlink-and-pr-auto-merge-result.md`，端到端结果 `docs/ai/context/20260924-105858-pr-auto-merge-pipeline-e2e-result.md`
+- 每日文档维护（本机 crontab 每天 03:30 运行 `scripts/daily_docs_maintenance.py`：独立 worktree 里先清理 `docs/ai/context/`、再用本机 Claude Code 压缩本文件并把移除内容完整归档，经 `ship_pr.py` 自动合并；日志 `~/.local/state/regennet-docs-maintenance/`）：设计 `docs/ai/context/20260924-110849-daily-docs-maintenance-cron-design-and-plan.md`，实现与验证 `docs/ai/context/20260924-111530-daily-docs-maintenance-cron-result.md`
