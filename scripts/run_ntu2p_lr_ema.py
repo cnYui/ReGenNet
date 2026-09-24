@@ -10,7 +10,9 @@ import os
 import statistics
 from collections import OrderedDict
 
-from scripts.run_ntu2p_articulation_stage1 import _evaluate, _log, _write_summary
+import torch
+
+from scripts.run_ntu2p_articulation_stage1 import _checkpoints, _evaluate, _log, _write_summary
 from scripts.run_ntu2p_articulation_stage2 import _row
 from scripts.run_ntu2p_articulation_stage3 import _save_dir, _train
 from scripts.run_ntu2p_final_10k import CONFIG, _evaluate_test, _split_rows, _write_final
@@ -53,19 +55,27 @@ def _collect(dry_run):
     return curves
 
 
-def _equivalence(curves):
-    """原始权重的逐位等价：EMA 不扰动训练；余弦衰减开始前轨迹与恒定学习率相同。"""
+def _same_weights(path_a, path_b):
+    state_a = torch.load(path_a, map_location="cpu")["model_state_dict"]
+    state_b = torch.load(path_b, map_location="cpu")["model_state_dict"]
+    return state_a.keys() == state_b.keys() and all(torch.equal(state_a[key], state_b[key]) for key in state_a)
+
+
+def _equivalence():
+    """直接比较权重（不依赖评估是否可复现）：EMA 不扰动训练；余弦衰减开始前轨迹与恒定学习率相同。"""
     checks = [("const-EMA 训练的 raw 权重", "ema", STEPS), ("cos 训练的 raw 权重", "cosema", DECAY_START)]
     lines = ["| 核对 | seed | 比较的 checkpoint | 逐位相同 |", "|---|---:|---|---|"]
     passed = True
     for label, prefix, last_step in checks:
         for seed in SEEDS:
-            raw = OrderedDict(_evaluate(_save_dir(CONFIG, seed, STEPS, prefix), dry_run=False))
-            reference = curves["const-raw"][seed]
-            steps = [step for step in reference if step <= last_step]
-            same = all(raw[step]["model_metrics"] == reference[step]["model_metrics"] for step in steps)
+            raw = dict(_checkpoints(_save_dir(CONFIG, seed, STEPS, prefix)))
+            reference = dict(_checkpoints(_variant_dir("const-raw", seed)))
+            steps = sorted(step for step in reference if step <= last_step)
+            # 缺任何一个应比较的 checkpoint 都算不通过，避免空集合"逐位相同"。
+            same = bool(steps) and all(step in raw and _same_weights(raw[step], reference[step]) for step in steps)
             passed = passed and same
-            lines.append("| {} vs const-raw | {} | {}–{} | {} |".format(label, seed, steps[0], steps[-1], "✓" if same else "✗"))
+            span = "{}–{}".format(steps[0], steps[-1]) if steps else "无"
+            lines.append("| {} vs const-raw | {} | {} | {} |".format(label, seed, span, "✓" if same else "✗"))
     return passed, lines
 
 
@@ -93,7 +103,10 @@ def _stats(curves):
     return stats
 
 
-def _decide(stats):
+def _decide(stats, equivalence_passed):
+    if not equivalence_passed:
+        # 实现未按设计工作时，各变体的差异不能归因于开关本身，不采纳任何变体。
+        return "const-raw", []
     control = stats["const-raw"]
     eligible = [
         variant for variant, s in stats.items()
@@ -126,6 +139,8 @@ def _write_decision(stats, chosen, eligible, equivalence_lines, passed):
                 s["xyz_mse"], s["xyz_mae"], s["dct_mid"], s["frozen"], s["gate"], len(SEEDS),
             )
         )
+    if not passed:
+        lines += ["", "**等价性核对未通过（见 equivalence.md），不采纳任何变体。**"]
     lines += ["", "满足采纳条件：{}；选中：**{}**".format(", ".join(eligible) or "无", chosen)]
     with open(os.path.join(SUMMARY_DIR, "decision.md"), "w") as handle:
         handle.write("\n".join(lines) + "\n")
@@ -164,9 +179,9 @@ def main():
         _log("dry run done")
         return
     _write_summary([_row("{}_s{}".format(v, seed), step, r) for v, per_seed in curves.items() for seed, steps in per_seed.items() for step, r in steps.items()], SUMMARY_DIR)
-    passed, equivalence_lines = _equivalence(curves)
+    passed, equivalence_lines = _equivalence()
     stats = _stats(curves)
-    chosen, eligible = _decide(stats)
+    chosen, eligible = _decide(stats, passed)
     _write_decision(stats, chosen, eligible, equivalence_lines, passed)
     _log("all done; equivalence_passed={} chosen={} ; see {}".format(passed, chosen, SUMMARY_DIR))
 
