@@ -1,7 +1,7 @@
 """NTU2P residual refiner 误差随预测帧数的曲线：mpjpe / root / local / A-B 相对 root。
 
 用法：--checkpoint name=path 可重复；名字以 _s<seed> 结尾的 checkpoint 按前缀聚合成均值 ± 标准差。
-base（冻结独立单人）取第一个 checkpoint 的 base 输出，copy-last 由观测末帧外推，二者与 seed 无关。
+base（冻结独立单人）取第一个 checkpoint 的 base 输出，copy-last 重复观测末帧，二者与 seed 无关。
 """
 
 import argparse

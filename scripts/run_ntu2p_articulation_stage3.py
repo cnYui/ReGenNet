@@ -26,7 +26,7 @@ def _save_dir(config, seed, steps, prefix="s3"):
     return os.path.join(SAVE_ROOT, "ntu2p_residual_refiner_xyz_artic_{}_{}_s{}_{}".format(prefix, config, seed, steps))
 
 
-def _train(config, seed, steps, dry_run, prefix="s3"):
+def _train(config, seed, steps, dry_run, prefix="s3", extra_args=()):
     save_dir = _save_dir(config, seed, steps, prefix)
     final = os.path.join(save_dir, "model{:09d}.pt".format(steps))
     if os.path.exists(final):
@@ -36,7 +36,7 @@ def _train(config, seed, steps, dry_run, prefix="s3"):
     seed_index = common.index("--seed")
     common[seed_index + 1] = str(seed)
     command = [sys.executable, "train/train_ntu2p_residual_refiner_xyz.py", "--save_dir", save_dir, "--num_steps", str(steps)]
-    command += common + CONFIGS[config]
+    command += common + CONFIGS[config] + list(extra_args)
     if dry_run:
         _log("DRY RUN: " + " ".join(command))
     else:

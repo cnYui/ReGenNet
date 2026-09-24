@@ -1,7 +1,9 @@
 """训练继承 independent single-person baseline 的 NTU 双人 xyz residual refiner。"""
 
 import argparse
+import copy
 import json
+import math
 import os
 from collections import OrderedDict
 from datetime import datetime
@@ -226,8 +228,39 @@ def _estimate_copy_last_scales(args, converter, device):
     return OrderedDict((key, max(value / float(count), 1e-8)) for key, value in sums.items())
 
 
-def _save_checkpoint(args, model, optimizer, step):
-    path = os.path.join(args.save_dir, "model{:09d}.pt".format(int(step)))
+def _lr_at(args, step):
+    """第 step 次更新（0 起）使用的学习率；cosine_tail 只在最后一段衰减，前段与恒定学习率逐位相同。"""
+    start = int(round(args.num_steps * args.lr_decay_start_frac))
+    if step < start:
+        return args.lr
+    progress = float(step - start) / float(max(1, args.num_steps - start))
+    return args.lr_min + 0.5 * (args.lr - args.lr_min) * (1.0 + math.cos(math.pi * progress))
+
+
+def _ema_model(model):
+    ema = copy.deepcopy(model)
+    ema.eval()
+    for param in ema.parameters():
+        param.requires_grad_(False)
+    return ema
+
+
+@torch.no_grad()
+def _update_ema(ema, model, decay):
+    # 冻结的 base 参数与常量 buffer 直接复制，只对可训练参数做滑动平均。
+    for ema_param, param in zip(ema.parameters(), model.parameters()):
+        if param.requires_grad:
+            ema_param.mul_(decay).add_(param.detach(), alpha=1.0 - decay)
+        else:
+            ema_param.copy_(param.detach())
+    for ema_buffer, buffer in zip(ema.buffers(), model.buffers()):
+        ema_buffer.copy_(buffer)
+
+
+def _save_checkpoint(args, model, optimizer, step, save_dir=None):
+    save_dir = save_dir or args.save_dir
+    os.makedirs(save_dir, exist_ok=True)
+    path = os.path.join(save_dir, "model{:09d}.pt".format(int(step)))
     torch.save(
         {
             "model_state_dict": model.state_dict(),
@@ -245,10 +278,11 @@ def _save_checkpoint(args, model, optimizer, step):
         },
         path,
     )
-    torch.save(
-        {"optimizer_state_dict": optimizer.state_dict(), "step": int(step)},
-        os.path.join(args.save_dir, "opt{:09d}.pt".format(int(step))),
-    )
+    if optimizer is not None:
+        torch.save(
+            {"optimizer_state_dict": optimizer.state_dict(), "step": int(step)},
+            os.path.join(save_dir, "opt{:09d}.pt".format(int(step))),
+        )
     return path
 
 
@@ -313,6 +347,8 @@ def run(args):
         )
     )
 
+    ema = _ema_model(model) if args.ema_decay > 0 else None
+    ema_dir = os.path.join(args.save_dir, "ema")
     step = 0
     checkpoint = None
     while step < args.num_steps:
@@ -329,7 +365,12 @@ def run(args):
             loss.backward()
             if args.clip_grad_norm > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
+            if args.lr_schedule != "constant":
+                for group in optimizer.param_groups:
+                    group["lr"] = _lr_at(args, step)
             optimizer.step()
+            if ema is not None:
+                _update_ema(ema, model, args.ema_decay)
             step += 1
             record = OrderedDict(
                 [
@@ -337,6 +378,7 @@ def run(args):
                     ("train_loss", float(loss.detach().cpu().item())),
                     ("delta_reg", float(delta_reg.detach().cpu().item())),
                     ("alpha", float(model.alpha.detach().cpu().item())),
+                    ("lr", float(optimizer.param_groups[0]["lr"])),
                     ("device", str(device)),
                     ("base_checkpoint_step", int(args.base_checkpoint_step)),
                     ("created_at", _utc_now()),
@@ -351,9 +393,13 @@ def run(args):
             if step % args.save_interval == 0 or step == args.num_steps:
                 checkpoint = _save_checkpoint(args, model, optimizer, step)
                 record["checkpoint"] = checkpoint
+                if ema is not None:
+                    record["ema_checkpoint"] = _save_checkpoint(args, ema, None, step, save_dir=ema_dir)
             _append_log(log_path, record)
     if checkpoint is None:
         checkpoint = _save_checkpoint(args, model, optimizer, step)
+        if ema is not None:
+            _save_checkpoint(args, ema, None, step, save_dir=ema_dir)
     print("Training finished. final_checkpoint={}".format(checkpoint))
     return checkpoint
 
@@ -401,6 +447,11 @@ def build_arg_parser():
     parser.add_argument("--ramp_saturate_frames", type=int, default=5)
     parser.add_argument("--future_pos_mode", choices=("learned_zero", "sinusoidal"), default="learned_zero")
     parser.add_argument("--lr", type=float, default=3e-4)
+    # 降低终点抖动的两个开关，默认关闭时训练逐位不变。
+    parser.add_argument("--lr_schedule", choices=("constant", "cosine_tail"), default="constant")
+    parser.add_argument("--lr_decay_start_frac", type=float, default=0.8)
+    parser.add_argument("--lr_min", type=float, default=3e-5)
+    parser.add_argument("--ema_decay", type=float, default=0.0, help="0 表示关闭；影子权重存到 save_dir/ema/")
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--clip_grad_norm", type=float, default=1.0)
     parser.add_argument("--max_samples", type=int, default=-1)
