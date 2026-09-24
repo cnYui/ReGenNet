@@ -22,12 +22,12 @@ CONFIGS = {
 }
 
 
-def _save_dir(config, seed, steps):
-    return os.path.join(SAVE_ROOT, "ntu2p_residual_refiner_xyz_artic_s3_{}_s{}_{}".format(config, seed, steps))
+def _save_dir(config, seed, steps, prefix="s3"):
+    return os.path.join(SAVE_ROOT, "ntu2p_residual_refiner_xyz_artic_{}_{}_s{}_{}".format(prefix, config, seed, steps))
 
 
-def _train(config, seed, steps, dry_run):
-    save_dir = _save_dir(config, seed, steps)
+def _train(config, seed, steps, dry_run, prefix="s3"):
+    save_dir = _save_dir(config, seed, steps, prefix)
     final = os.path.join(save_dir, "model{:09d}.pt".format(steps))
     if os.path.exists(final):
         _log("skip train {} (final checkpoint exists)".format(save_dir))
