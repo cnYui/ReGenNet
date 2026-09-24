@@ -23,7 +23,7 @@ claude -p <审查提示> --output-format json --json-schema <verdict/summary/fin
 - `dontAsk` + 白名单：审查过程只能读代码和 git 历史，不能改工作区；不加载 MCP，减少耗时与外部依赖。
 - 连通性实测：`loggedIn=true, authMethod=claude.ai`，`structured_output` 按模式返回。
 - 放行规则 `decide()`：`verdict=block` 或任一 finding 为 `blocking` 即阻断，两者不一致时从严。
-- 原始结论存 `.git/claude-review/<sha>.json`（不入库），同一提交重跑时直接复用，不重复审查；同时以 PR 评论形式留痕。
+- 原始结论存 `.git/claude-review/<head>-<merge-base 前 12 位>.json`（不入库），head 与 merge-base 都不变时重跑直接复用，不重复审查；同时以 PR 评论形式留痕。
 
 ## 三、本地验证
 
@@ -37,7 +37,17 @@ claude -p <审查提示> --output-format json --json-schema <verdict/summary/fin
 | 纯函数断言 | 远端 URL 解析（https/ssh/无 .git）、`decide` 从严、`parse_gone_branches`、评论渲染（`|` 转义）均通过 |
 | 真实仓库 `sync` 影响预演 | 现有 5 个本地分支没有上游消失的，`sync` 不会删除任何已有分支 |
 
-## 四、基线与已知限制
+## 四、本机审查首次实测与修正
+
+对提交 `abd58e7` 运行 `python3 scripts/ship_pr.py review`：结论"通过"，给出 1 个 major、2 个 minor，经核实全部成立并处理：
+
+| 级别 | 问题 | 处理 |
+|---|---|---|
+| major | `wait_for_merge` 在"全部检查 pass/skipping"时判定未合并；但合并 job 依赖约定检查，其 check 要稍后才出现，间隙内会误报失败并跳过 sync | 改为以合并 job（`自动合并`，常量 `MERGE_JOB_NAME`）自身结束为准 |
+| minor | 审查缓存只以 head SHA 为 key，`fork/main` 前进后审查范围已变却会复用旧结论 | key 改为 head + merge-base |
+| minor | 设计文档第 7 条写 `git branch -d`，实现为先 `merge-base --is-ancestor` 确认已并入 main 再 `git branch -D`（避免 `-d` 按当前 HEAD 判断而误拒） | 以实现为准，在此注明；设计文档作为历史记录不改 |
+
+## 五、基线与已知限制
 
 - 全仓 ruff 基线 13 处 F821，均在上游遗留文件（`actor-x/src/evaluate/tables/easy_table_A2M.py`、`actor-x/src/models/modeltype/kgan.py`、`data_loaders/humanml/motion_loaders/model_motion_loaders.py`、`model/transformer_utils.py`）；按设计只拦截新增问题，未修改这些文件。
 - 本地未安装 ruff，`ship_pr.py` 在本地跳过 Python 检查，由 CI 兜底。

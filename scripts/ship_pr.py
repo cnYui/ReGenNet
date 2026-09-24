@@ -26,6 +26,7 @@ MAIN = "main"
 # 与 .github/workflows/pr-auto-merge.yml 中的 REVIEW_CONTEXT 保持一致
 STATUS_CONTEXT = "claude-review"
 WORKFLOW_FILE = "pr-auto-merge.yml"
+MERGE_JOB_NAME = "自动合并"  # 与 workflow 中合并 job 的 name 保持一致
 REVIEW_TIMEOUT_S = 30 * 60
 MERGE_TIMEOUT_S = 30 * 60
 POLL_S = 15
@@ -138,8 +139,9 @@ def review_branch(remote: str) -> Tuple[str, Dict[str, object]]:
     errors = run_checks(base, "HEAD", shutil.which("ruff"))
     if errors:
         raise ShipError("仓库约定检查未通过：\n" + "\n".join("  ✗ " + e for e in errors))
-    # 同一提交内容不变，结论可复用；推送或建 PR 失败后重跑时不必再等一次审查
-    cache = Path(run("git", "rev-parse", "--git-dir")) / "claude-review" / f"{head}.json"
+    # 审查范围由 head 与 merge-base 共同决定，两者都不变时结论可复用；推送或建 PR 失败后重跑不必再等一次审查
+    merge_base = run("git", "merge-base", base, "HEAD")
+    cache = Path(run("git", "rev-parse", "--git-dir")) / "claude-review" / f"{head}-{merge_base[:12]}.json"
     if cache.exists():
         review = json.loads(cache.read_text(encoding="utf-8"))
         print(f"复用该提交已有的审查结论：{cache}")
@@ -216,8 +218,8 @@ def wait_for_merge(slug: str, pr: str) -> None:
         failed = sorted(name for name, bucket in buckets.items() if bucket in ("fail", "cancel"))
         if failed:
             raise ShipError(f"CI 未通过：{', '.join(failed)}；详情：gh pr checks {pr} --repo {slug}")
-        # 合并发生在合并 job 内部，检查全部结束仍未合并说明合并 job 被跳过（草稿 PR 或非仓库所有者）
-        if buckets and all(b in ("pass", "skipping") for b in buckets.values()) and pr_state(slug, pr) != "MERGED":
+        # 合并 job 要等约定检查结束才出现，只能以它自身结束为准；它结束仍未合并说明被跳过（草稿 PR 或非仓库所有者）
+        if buckets.get(MERGE_JOB_NAME) in ("pass", "skipping") and pr_state(slug, pr) != "MERGED":
             raise ShipError("CI 已结束但没有自动合并（草稿 PR 或作者不是仓库所有者？）")
         if time.time() > deadline:
             raise ShipError(f"等待超过 {MERGE_TIMEOUT_S // 60} 分钟仍未合并")
