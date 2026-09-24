@@ -3,8 +3,8 @@
 
 检查 base...head（以 merge-base 为起点）之间的改动：
 1. CLAUDE.md 必须是指向 AGENTS.md 的软链接；
-2. docs/ai/context/ 历史文件不得修改；可以删除（每日清理由 scripts/prune_ai_context.py 执行），
-   但删除后不得留下悬空引用；新增 .md 必须命名为 YYYYMMDD-HHMMSS-名称.md；
+2. docs/ai/context/ 历史文件不得修改；只能删除文件名日期已超过保留期的文件（每日清理由
+   scripts/prune_ai_context.py 执行），且删除后不得留下悬空引用；新增 .md 必须命名为 YYYYMMDD-HHMMSS-名称.md；
 3. 改动的 .py 文件不得新增 ruff 问题（目标 Python 3.7）。
 
 用法：python3 scripts/check_repo_conventions.py --base fork/main [--head HEAD] [--ruff ruff | --skip-python]
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import datetime
 import json
 import os
 import re
@@ -23,7 +24,8 @@ import tempfile
 from pathlib import Path
 from typing import Counter, Dict, List, Optional, Tuple
 
-CONTEXT_DIR = "docs/ai/context/"
+from prune_ai_context import CONTEXT_DIR, DATE_PREFIX, DEFAULT_DAYS
+
 CONTEXT_MD_NAME = re.compile(r"^\d{8}-\d{6}-[^/]+\.md$")
 SYMLINK_MODE = "120000"
 # 项目运行环境是 Python 3.7.13，按 py37 检查才能拦住 3.8+ 语法；只选会导致运行失败的规则，避免风格噪音
@@ -82,15 +84,26 @@ def dangling_references(head: str, names: List[str]) -> Dict[str, List[str]]:
     return found
 
 
-def check_context_docs(changes: List[Change], head: str) -> List[str]:
+def deletion_cutoff(today: datetime.date) -> str:
+    """文件名日期早于该值才允许删除。CI 按 UTC 取日期，比本机（JST）最多早一天，
+    因此比清理脚本放宽一天，保证每日任务按本机日期删除的文件都能通过。"""
+    return (today - datetime.timedelta(days=DEFAULT_DAYS - 1)).strftime("%Y%m%d")
+
+
+def check_context_docs(changes: List[Change], head: str, today: Optional[datetime.date] = None) -> List[str]:
     """changes 须按 --no-renames 取得：改名即"删除 + 新增"，两半分别受约束。"""
     errors = []
     deleted = []
+    cutoff = deletion_cutoff(today or datetime.date.today())
     for status, path, _ in changes:
         if not path.startswith(CONTEXT_DIR):
             continue
         if status == "D":
-            deleted.append(path[len(CONTEXT_DIR):])
+            name = path[len(CONTEXT_DIR):]
+            match = DATE_PREFIX.match(name)
+            if not match or match.group(1) >= cutoff:
+                errors.append(f"{path} 的文件名日期未早于 {cutoff}（保留期 {DEFAULT_DAYS} 天）或没有日期前缀，不得删除")
+            deleted.append(name)
         elif status != "A":
             action = {"M": "修改", "T": "改变类型"}.get(status, status)
             errors.append(f"{CONTEXT_DIR} 历史文件不得修改，本 PR {action}了 {path}")
