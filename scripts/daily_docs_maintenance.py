@@ -215,6 +215,8 @@ def main(argv: List[str]) -> int:
     parser.add_argument("--dry-run", action="store_true",
                         help="在临时 worktree 中真实清理与压缩并打印改动，不提交、不推送，worktree 结束即丢弃")
     args = parser.parse_args(argv)
+    # cron 把输出重定向到日志文件时是块缓冲，本脚本的输出会落到子进程（ship_pr.py、git）输出之后，日志顺序错乱
+    sys.stdout.reconfigure(line_buffering=True)
     try:
         maintain(args.dry_run)
     except ShipError as error:
