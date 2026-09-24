@@ -2,7 +2,7 @@
 """每日文档维护：先清理 docs/ai/context，再用本机 Claude Code 压缩 AGENTS.md，合成一个 PR 自动合并。
 
 用法：python3 scripts/daily_docs_maintenance.py [--dry-run]
-  --dry-run  只做清理与压缩并打印改动，不提交、不推送
+  --dry-run  清理与压缩照常在临时 worktree 中真实执行并打印改动，但不提交、不推送，worktree 结束即丢弃
 
 流程：前置检查 → 基于 <remote>/main 建临时 worktree → prune_ai_context.py 清理 → claude -p 压缩 AGENTS.md
 → 校验改动只在 AGENTS.md 与 docs/ai/context/ → 提交 → ship_pr.py（本机审查、推送、CI 自动合并、同步本地 main）
@@ -212,7 +212,8 @@ def maintain(dry_run: bool) -> None:
 
 def main(argv: List[str]) -> int:
     parser = argparse.ArgumentParser(description="每日 docs/ai/context 清理 + AGENTS.md 压缩")
-    parser.add_argument("--dry-run", action="store_true", help="只做清理与压缩并打印改动，不提交、不推送")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="在临时 worktree 中真实清理与压缩并打印改动，不提交、不推送，worktree 结束即丢弃")
     args = parser.parse_args(argv)
     try:
         maintain(args.dry_run)

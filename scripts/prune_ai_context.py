@@ -4,7 +4,7 @@
 保留规则（任一命中即保留）：
 1. 文件名日期（YYYYMMDD 前缀）在保留期内，或文件名没有日期前缀；
 2. 正文含 `<!-- prune:keep -->` 标记；
-3. 文件名出现在 context 目录之外的任一 git 跟踪文件中（AGENTS.md、README、脚本等）；
+3. 文件名出现在其它任一 git 跟踪文件中（AGENTS.md、README、脚本、context 子目录等）；
 4. 文件名出现在已保留的 context 文档中（按闭包传递）——入口常写"详见 X 及其引用文档"，只看直接引用会切断这条链。
 
 引用按文件名子串匹配，与 check_repo_conventions.py 的悬空引用检查（git grep -F）口径一致。
@@ -48,7 +48,7 @@ def mentioned(names: Iterable[str], text: str) -> Set[str]:
 
 def plan_prune(docs: Dict[str, Optional[str]], outside: Dict[str, str],
                cutoff: str) -> Tuple[List[str], Dict[str, str]]:
-    """纯函数：docs 为 {文件名: 正文或 None}，outside 为 {context 外路径: 正文}。
+    """纯函数：docs 为 {文件名: 正文或 None}，outside 为 {其它跟踪文件路径: 正文}。
 
     返回 (待删除文件名, {保留文件名: 原因})。
     """
@@ -83,9 +83,9 @@ def collect(root: Path) -> Tuple[Dict[str, Optional[str]], Dict[str, str]]:
         path = root / rel
         if not path.is_file():  # 已在工作区删除但未提交
             continue
-        if rel.startswith(CONTEXT_DIR):
-            if "/" not in rel[len(CONTEXT_DIR):]:
-                docs[path.name] = read_text(path)
+        # context 子目录中的文件不参与清理，但与其它仓库文件一样算作引用来源，和 CI 扫全树的口径一致
+        if rel.startswith(CONTEXT_DIR) and "/" not in rel[len(CONTEXT_DIR):]:
+            docs[path.name] = read_text(path)
         else:
             text = read_text(path)
             if text is not None:
