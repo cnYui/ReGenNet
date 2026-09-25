@@ -181,7 +181,7 @@ class NTU2PResidualRefinerXYZ(nn.Module):
         nn.init.zeros_(self.delta_proj.weight)
         nn.init.zeros_(self.delta_proj.bias)
 
-        # alpha=1 保留零初始化 delta head 的梯度；alpha=0 仍用于严格等价性测试。
+        # alpha=1 保留零初始化 delta head 的梯度；alpha=0 仍用于严格等价性测试（仅 root_head_mode=none 时成立）。
         self.alpha = nn.Parameter(torch.tensor(float(alpha)))
 
         # none 时不创建任何模块，训练与历史 run 逐位等价；dct 时在 fork 出的 CPU 随机数流里初始化，
@@ -321,6 +321,7 @@ class NTU2PResidualRefinerXYZ(nn.Module):
         delta = delta * self.ramp.to(dtype=delta.dtype)
         pred_xyz = base_xyz + self.alpha * delta
         if self.root_head_mode == "dct":
+            # 整体平移不受 alpha 缩放：dct 模式下 alpha=0 不等于 base 输出，初始等价由零初始化的 root_out 保证。
             pred_xyz = pred_xyz + self._root_offset(obs_xyz, decoded_a, decoded_b).unsqueeze(3)
         check_ntu_xyz("pred_xyz", pred_xyz, seq_len=self.pred_len, num_persons=2)
         if return_details:
