@@ -322,6 +322,8 @@ def run(args):
         ramp_mode=args.ramp_mode,
         ramp_saturate_frames=args.ramp_saturate_frames,
         future_pos_mode=args.future_pos_mode,
+        root_head_mode=args.root_head_mode,
+        root_dct_k=args.root_dct_k,
     ).to(device)
     converter = Rotation2xyz_x(device=device, dataset="ntu120_2p")
     # 用独立的数据集实例估计常量，避免消耗训练集的随机窗口采样流。
@@ -446,6 +448,9 @@ def build_arg_parser():
     parser.add_argument("--ramp_mode", choices=("linear", "saturate"), default="linear")
     parser.add_argument("--ramp_saturate_frames", type=int, default=5)
     parser.add_argument("--future_pos_mode", choices=("learned_zero", "sinusoidal"), default="learned_zero")
+    # root 轨迹锚定 DCT 头；默认 none 时不创建任何模块，训练与历史 run 逐位等价。
+    parser.add_argument("--root_head_mode", choices=("none", "dct"), default="none")
+    parser.add_argument("--root_dct_k", type=int, default=5)
     parser.add_argument("--lr", type=float, default=3e-4)
     # 降低终点抖动的两个开关，默认关闭时训练逐位不变。
     parser.add_argument("--lr_schedule", choices=("constant", "cosine_tail"), default="constant")

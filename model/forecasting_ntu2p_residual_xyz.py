@@ -15,6 +15,7 @@ from utils.ntu_smplx_2p_xyz import (
     NTU_SMPLX_BODY_JOINTS,
     XYZ_COORD_DIM,
     check_ntu_xyz,
+    dct_matrix,
 )
 
 
@@ -24,6 +25,7 @@ NUM_ACTIONS = 26
 
 RAMP_MODES = ("linear", "saturate")
 FUTURE_POS_MODES = ("learned_zero", "sinusoidal")
+ROOT_HEAD_MODES = ("none", "dct")
 
 
 def count_parameters(model):
@@ -50,6 +52,12 @@ def build_sinusoidal_position(seq_len, dim):
     encoding[:, 0::2] = torch.sin(position * div_term)
     encoding[:, 1::2] = torch.cos(position * div_term)
     return encoding.unsqueeze(1)
+
+
+def build_anchored_dct_basis(pred_len, num_coeffs):
+    """phi_k(t) - phi_k(0)，k=1..K：首帧恰为 0 保证与观测末帧连续，低频截断保证 root 轨迹平滑。"""
+    phi = dct_matrix(int(pred_len))
+    return (phi - phi[:, :1])[1 : int(num_coeffs) + 1]
 
 
 def _normalize_action(action, batch_size, num_actions, device):
@@ -87,6 +95,8 @@ class NTU2PResidualRefinerXYZ(nn.Module):
         ramp_mode="linear",
         ramp_saturate_frames=5,
         future_pos_mode="learned_zero",
+        root_head_mode="none",
+        root_dct_k=5,
     ):
         super(NTU2PResidualRefinerXYZ, self).__init__()
         if not isinstance(base_model, NTULabelXYZTransformer):
@@ -114,6 +124,12 @@ class NTU2PResidualRefinerXYZ(nn.Module):
         self.ramp_mode = str(ramp_mode)
         self.ramp_saturate_frames = int(ramp_saturate_frames)
         self.future_pos_mode = str(future_pos_mode)
+        self.root_head_mode = str(root_head_mode)
+        self.root_dct_k = int(root_dct_k)
+        if self.root_head_mode not in ROOT_HEAD_MODES:
+            raise ValueError("root_head_mode 必须是 {}，当前为 {}".format(ROOT_HEAD_MODES, self.root_head_mode))
+        if self.root_head_mode == "dct" and not 1 <= self.root_dct_k < self.pred_len:
+            raise ValueError("root_dct_k 必须在 [1,{}) 内".format(self.pred_len))
         if self.ramp_mode not in RAMP_MODES:
             raise ValueError("ramp_mode 必须是 {}，当前为 {}".format(RAMP_MODES, self.ramp_mode))
         if self.future_pos_mode not in FUTURE_POS_MODES:
@@ -168,6 +184,23 @@ class NTU2PResidualRefinerXYZ(nn.Module):
         # alpha=1 保留零初始化 delta head 的梯度；alpha=0 仍用于严格等价性测试。
         self.alpha = nn.Parameter(torch.tensor(float(alpha)))
 
+        # none 时不创建任何模块，训练与历史 run 逐位等价；dct 时在 fork 出的 CPU 随机数流里初始化，
+        # 使同 seed 下数据打乱顺序与对照一致（配对比较），零初始化输出层保证初始输出也一致。
+        if self.root_head_mode == "dct":
+            self.register_buffer(
+                "root_dct_basis",
+                build_anchored_dct_basis(self.pred_len, self.root_dct_k),
+                persistent=False,
+            )
+            with torch.random.fork_rng(devices=[]):
+                # 输入：本人观测 root 相对末帧的轨迹 + 对方相对本人的观测 root 轨迹，各 obs_len×3。
+                self.root_kin_proj = nn.Linear(2 * self.obs_len * self.coord_dim, self.latent_dim)
+                self.root_norm = nn.LayerNorm(self.latent_dim)
+                self.root_hidden = nn.Linear(self.latent_dim, self.latent_dim)
+                self.root_out = nn.Linear(self.latent_dim, self.root_dct_k * self.coord_dim)
+            nn.init.zeros_(self.root_out.weight)
+            nn.init.zeros_(self.root_out.bias)
+
         if self.freeze_base:
             self.set_base_trainable(False)
 
@@ -201,6 +234,8 @@ class NTU2PResidualRefinerXYZ(nn.Module):
                 ("ramp_mode", self.ramp_mode),
                 ("ramp_saturate_frames", self.ramp_saturate_frames),
                 ("future_pos_mode", self.future_pos_mode),
+                ("root_head_mode", self.root_head_mode),
+                ("root_dct_k", self.root_dct_k),
                 ("architecture", "frozen_single_person_base_plus_cross_person_residual"),
                 ("base_frozen_by_default", True),
             ]
@@ -240,6 +275,20 @@ class NTU2PResidualRefinerXYZ(nn.Module):
         output = self.delta_proj(self.delta_norm(tokens)).transpose(0, 1).contiguous()
         return output.reshape(batch_size, seq_len, 1, self.num_joints, self.coord_dim)
 
+    def _root_offset(self, obs_xyz, decoded_a, decoded_b):
+        """每人一组锚定 DCT 系数 -> 整体平移轨迹 [B,T,2,3]；A/B 共享参数，输入按本人视角构造。"""
+        root = obs_xyz[:, :, :, 0]
+        batch_size = int(obs_xyz.shape[0])
+        offsets = []
+        for person, other, decoded in ((0, 1, decoded_a), (1, 0, decoded_b)):
+            own = root[:, :, person]
+            kinematics = torch.cat((own - own[:, -1:], root[:, :, other] - own), dim=1).reshape(batch_size, -1)
+            hidden = self.root_kin_proj(kinematics) + decoded.mean(dim=0)
+            hidden = torch.nn.functional.gelu(self.root_hidden(self.root_norm(hidden)))
+            coeffs = self.root_out(hidden).reshape(batch_size, self.root_dct_k, self.coord_dim)
+            offsets.append(torch.einsum("kt,bkc->btc", self.root_dct_basis.to(dtype=coeffs.dtype), coeffs))
+        return torch.stack(offsets, dim=2)
+
     def forward(self, obs_xyz, action, return_details=False):
         check_ntu_xyz("obs_xyz", obs_xyz, seq_len=self.obs_len, num_persons=2)
         batch_size = int(obs_xyz.shape[0])
@@ -271,6 +320,8 @@ class NTU2PResidualRefinerXYZ(nn.Module):
         delta = torch.cat((delta_a, delta_b), dim=2)
         delta = delta * self.ramp.to(dtype=delta.dtype)
         pred_xyz = base_xyz + self.alpha * delta
+        if self.root_head_mode == "dct":
+            pred_xyz = pred_xyz + self._root_offset(obs_xyz, decoded_a, decoded_b).unsqueeze(3)
         check_ntu_xyz("pred_xyz", pred_xyz, seq_len=self.pred_len, num_persons=2)
         if return_details:
             return pred_xyz, base_xyz, delta
@@ -323,6 +374,8 @@ def load_ntu2p_residual_refiner_checkpoint(path, device):
         ramp_mode=model_config.get("ramp_mode", "linear"),
         ramp_saturate_frames=model_config.get("ramp_saturate_frames", 5),
         future_pos_mode=model_config.get("future_pos_mode", "learned_zero"),
+        root_head_mode=model_config.get("root_head_mode", "none"),
+        root_dct_k=model_config.get("root_dct_k", 5),
     )
     model.load_state_dict(state["model_state_dict"])
     model.to(device)
