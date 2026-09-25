@@ -157,7 +157,21 @@ def _summarize(dry_run):
     return decision
 
 
+def _check_test_config(name):
+    """协议要求 test 只评估按 val 规则最终采纳的配置；不靠人工遵守，直接核对 decision.json。"""
+    path = os.path.join(SUMMARY_DIR, "decision.json")
+    if not os.path.exists(path):
+        raise SystemExit("缺少 {}，先完成汇总判断再评估 test".format(path))
+    with open(path) as handle:
+        chosen = json.load(handle)["chosen"]
+    if chosen in (CONTROL, "pending-stage-b"):
+        raise SystemExit("当前判断为 {}，没有可评估 test 的新配置".format(chosen))
+    if name != chosen:
+        raise SystemExit("--test_config {} 与 decision.json 选中的 {} 不一致".format(name, chosen))
+
+
 def _run_test(name):
+    _check_test_config(name)
     tables = OrderedDict()
     for label in (name, CONTROL):
         results = [(seed, _evaluate_test(os.path.join(_variant_dir(label, seed), "model{:09d}.pt".format(STEPS)), False)) for seed in SEEDS]
