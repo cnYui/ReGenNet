@@ -195,6 +195,23 @@ def old_scale_starts(cache, seed, window_len):
     return torch.as_tensor([rng.randint(0, int(length) - int(window_len)) for length in cache.lengths_cpu.tolist()], dtype=torch.long)
 
 
+# 主损失的关节子集。刚体手下 30 个手指关节≈手腕误差复制 15 倍，占 A6 总 loss 81%、腿只有 7.7%；
+# 子集保留身体 25 个关节（索引不变，交互项的手腕索引仍有效）与每只手少数手指根关节（足以确定刚体手旋转）。
+# 只作用于 s2_5 主损失及其归一化常数；脚接触、步态等额外项仍用全部关节。
+LOSS_JOINT_SUBSETS = OrderedDict(
+    [
+        ("all", None),
+        ("hand2", tuple(range(25)) + (25, 31, 40, 46)),
+        ("hand5", tuple(range(25)) + (25, 28, 31, 34, 37, 40, 43, 46, 49, 52)),
+    ]
+)
+
+
+def _loss_joints(value, args):
+    index = LOSS_JOINT_SUBSETS[getattr(args, "loss_joint_subset", "all")]
+    return value if index is None else value[..., list(index), :]
+
+
 def _estimate_scales(args, cache):
     """copy-last 在 train 上的各项误差作归一化常量，与旧 `_estimate_copy_last_scales` 用完全相同的窗口与分批。
 
@@ -225,7 +242,7 @@ def _estimate_scales(args, cache):
             obs_xyz = window[:, : args.obs_len].contiguous()
             target_xyz = window[:, args.obs_len :].contiguous()
             copy_xyz = copy_last_xyz(obs_xyz, args.pred_len)
-            terms = _raw_terms(copy_xyz, target_xyz, obs_xyz, args, LOSS_TERM_KEYS)
+            terms = _raw_terms(*(_loss_joints(value, args) for value in (copy_xyz, target_xyz, obs_xyz)), args, LOSS_TERM_KEYS)
             if args.foot_loss_weight > 0:
                 terms["foot"] = _foot_loss(slide_reference(obs_xyz, target_xyz), target_xyz, obs_xyz)
             if gait_weights:
@@ -376,7 +393,11 @@ def run(args):
             ]
         )
         details = forward_details(model, obs_xyz, action, context)
-        loss, delta_reg = _loss_terms(details["pred"], details["delta"], target_xyz, obs_xyz, loss_args, scales=loss_scales)
+        loss, delta_reg = _loss_terms(
+            *(_loss_joints(value, args) for value in (details["pred"], details["delta"], target_xyz, obs_xyz)),
+            loss_args,
+            scales=loss_scales,
+        )
         extra, extra_values, extra_weighted = _extra_loss(details, target_xyz, obs_xyz, args, loss_scales)
         if extra is not None:
             loss = loss + extra
@@ -443,6 +464,8 @@ def build_arg_parser():
     parser.add_argument("--kin_proj", action="store_true", help="A4：输出经可微骨架投影")
     parser.add_argument("--free_aux_mse_weight", type=float, default=0.1, help="A4：投影前自由输出的 mse 辅助项权重")
     parser.add_argument("--foot_loss_weight", type=float, default=0.0, help="A5：脚接触一致性损失权重")
+    parser.add_argument("--loss_joint_subset", choices=tuple(LOSS_JOINT_SUBSETS), default="all",
+                        help="FD：s2_5 主损失只用身体 25 关节 + 每手少数手指根关节（手指去重）")
     parser.add_argument("--base_lr_mult", type=float, default=1.0, help="A2：解冻 base 时 base 学习率相对 refiner 的倍数")
     parser.add_argument("--intermixer_kwargs", default="{}", help="A6：传给 NTU2PInterMixer 的额外参数（JSON）")
     # 步态变体 GL/GH；默认全部关闭，训练与之前逐位相同。
