@@ -749,7 +749,7 @@ def main():
     parser.add_argument("--retrieval_bank", default=DEFAULT_RETRIEVAL_BANK)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--save_root", default=SAVE_ROOT)
-    parser.add_argument("--summary_dir", default=SUMMARY_DIR)
+    parser.add_argument("--summary_dir", default=None, help="缺省：原协议为 SUMMARY_DIR，其它 run 前缀为 results/.../<run_prefix>_screen")
     # 换数据划分（如受试者留出 val）时四项一起换：manifest、对应缓存、在该 train 上训练的冻结 base、run 目录前缀。
     parser.add_argument("--manifest_path", default=MANIFEST)
     parser.add_argument("--cache_dir", default=DEFAULT_CACHE_DIR)
@@ -763,6 +763,9 @@ def main():
     parser.add_argument("--extra_train_args", nargs=argparse.REMAINDER, default=[], help="仅冒烟测试：追加到训练命令末尾")
     opts = parser.parse_args()
     _RUN_PREFIX[0] = opts.run_prefix
+    # 换划分时汇总必须与原协议分开，否则两个协议的 summary_10000 会互相覆盖。
+    if opts.summary_dir is None:
+        opts.summary_dir = SUMMARY_DIR if opts.run_prefix == "ntu2p_v2" else os.path.join(os.path.dirname(SUMMARY_DIR), opts.run_prefix + "_screen")
     opts.smoke_args = ["--allow_cpu_for_smoke_test"] if opts.allow_cpu_for_smoke_test else []
     # --test_config 不依赖 --stage：否则默认 Stage 1 会让唯一一次 test 落在 5000 step 的筛选 checkpoint 上。
     steps = opts.steps or (FINAL_STEPS if (opts.stage == 3 or opts.test_config) else SCREEN_STEPS)
@@ -782,6 +785,9 @@ def main():
         configs = [CONTROL] + [name for name in opts.configs if name != CONTROL]
     for name in configs:
         config_args(name, opts.retrieval_bank)  # 先校验配置名，避免跑到一半才报错。
+        # 默认检索库由原协议 train 建成，含受试者留出 val 的受试者：换划分跑 A3 必须显式给出在新 train 上建的库。
+        if name.split("-")[0] == "A3" and opts.manifest_path != MANIFEST and opts.retrieval_bank == DEFAULT_RETRIEVAL_BANK:
+            raise ValueError("{}：换划分时 A3 不能使用原协议检索库，请用 --retrieval_bank 指定在新 train 上构建的库".format(name))
     configs = list(OrderedDict.fromkeys([CONTROL] + configs if opts.stage != 1 else configs))
 
     failures = [] if opts.summary_only else run_jobs(configs, opts.seeds, steps, opts)
