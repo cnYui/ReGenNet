@@ -22,6 +22,7 @@ import threading
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from data_loaders.forecasting.ntu2p_xyz_seq_cache import DEFAULT_CACHE_DIR
 from scripts.run_ntu2p_articulation_stage1 import BASELINE, MANIFEST, _log
 
 SAVE_ROOT = "save/forecasting/ntu120_label"
@@ -53,7 +54,7 @@ S2_5_RECIPE = [
 CANON = ["--arch", "canon_refiner", "--canonical", "--disp_channel", "--role_embed"]
 STAGE1_CONFIGS = ("A0", "A1", "A2", "A3", "A6")
 # 以自然度为主要目标的增量：L2 只要求不劣化超过 0.5%，自然度须明显改善（设计 4.2）。
-NATURALNESS_ADDONS = ("A4", "A5")
+NATURALNESS_ADDONS = ("A4", "A5", "FD")
 # 步态增量：目标是"步行者两腿前后交替迈步"，按步态相位指标判断（gait_criteria）。
 GAIT_ADDONS = ("GL", "GH")
 
@@ -150,21 +151,27 @@ def addon_args(token):
         return ["--augment_mirror_prob", "0.5", "--mirror_embed"]
     if token == "F":
         return ["--canonical_ab_fallback", "camera_x"]
+    if token in ("FD2", "FD5"):
+        return ["--loss_joint_subset", "hand{}".format(token[2:])]
     if token.startswith("A5f"):
         return ["--foot_loss_weight", str(float(token[3:]))]
     if token.startswith("GL"):
         return ["--leg_gait_loss_weight", str(float(token[2:])), "--dct_mid_exclude_legs"]
     if token.startswith("GH"):
         return ["--leg_stream", "--leg_gait_loss_weight", str(float(token[2:])), "--dct_mid_exclude_legs"]
-    raise ValueError("未知增量 {}（可选 A4、A5f<权重>、A7、F、GL<权重>、GH<权重>）".format(token))
+    raise ValueError("未知增量 {}（可选 A4、A5f<权重>、A7、F、GL<权重>、GH<权重>、FD2、FD5）".format(token))
 
 
 def config_args(name, retrieval_bank):
     tokens = name.split("-")
     gait = [index for index, token in enumerate(tokens) if token[:2] in GAIT_ADDONS]
     # 步态规则以"去掉最后一个 token"的配置为参照，步态 token 不在最后会让参照里混进另一个步态变体。
-    if len(gait) > 1 or (gait and gait[0] != len(tokens) - 1):
-        raise ValueError("{}：步态增量（GL/GH）至多一个且必须放在最后".format(name))
+    # 例外：其后只跟手指去重（FD）时，FD 的参照恰好是含该步态 token 的主线，不会混入别的步态变体。
+    trailing = len(tokens)
+    while trailing > 0 and tokens[trailing - 1][:2] == "FD":
+        trailing -= 1
+    if len(gait) > 1 or (gait and gait[0] != trailing - 1):
+        raise ValueError("{}：步态增量（GL/GH）至多一个且必须放在最后（其后只允许 FD）".format(name))
     args = list(base_config_args(tokens[0], retrieval_bank))
     for token in tokens[1:]:
         args += addon_args(token)
@@ -183,8 +190,12 @@ def last_addon(name):
     return None if len(tokens) == 1 else tokens[-1][:2]
 
 
+# 受试者留出协议（manifest_subjval）等不同数据划分的 run 用不同前缀，避免与原协议 run 目录互相覆盖。
+_RUN_PREFIX = ["ntu2p_v2"]
+
+
 def run_dir(name, seed, steps, save_root=SAVE_ROOT):
-    return os.path.join(save_root, "ntu2p_v2_{}_s{}_{}".format(name, seed, steps))
+    return os.path.join(save_root, "{}_{}_s{}_{}".format(_RUN_PREFIX[0], name, seed, steps))
 
 
 def eval_json(checkpoint_dir, steps, split="val"):
@@ -206,7 +217,8 @@ def _run(command, log_path, dry_run):
 
 def _eval_command(opts, checkpoint, output, split="val", export=None):
     command = [sys.executable, "eval/eval_ntu2p_v2.py", "--checkpoint", checkpoint, "--output", output,
-               "--split", split, "--manifest_path", MANIFEST, "--baseline_checkpoint", BASELINE, "--device", opts.device]
+               "--split", split, "--manifest_path", opts.manifest_path, "--cache_dir", opts.cache_dir,
+               "--baseline_checkpoint", opts.baseline_checkpoint, "--device", opts.device]
     if export:
         command += ["--export_arrays", export]
     return command + opts.smoke_args
@@ -244,7 +256,8 @@ def _job(name, seed, steps, opts):
             # 未完成的旧 run 从头重训；旧日志改名保留，避免与新日志混在一起。
             shutil.move(stale, stale + ".incomplete")
         command = [sys.executable, "train/train_ntu2p_v2.py", "--save_dir", save_dir, "--num_steps", str(steps),
-                   "--seed", str(seed), "--manifest_path", MANIFEST, "--baseline_checkpoint", BASELINE,
+                   "--seed", str(seed), "--manifest_path", opts.manifest_path, "--cache_dir", opts.cache_dir,
+                   "--baseline_checkpoint", opts.baseline_checkpoint,
                    "--device", opts.device] + S2_5_RECIPE + config_args(name, opts.retrieval_bank) + opts.smoke_args + opts.extra_train_args
         _say("train {} s{} {}".format(name, seed, steps))
         _run(command, log_path, opts.dry_run)
@@ -253,7 +266,8 @@ def _job(name, seed, steps, opts):
     for subdir in ("ema", ""):
         checkpoint_dir = os.path.join(save_dir, subdir) if subdir else save_dir
         output = eval_json(checkpoint_dir, steps)
-        posthoc = bool(subdir) and name == CONTROL
+        # 检索库由原协议 train 建成：换划分（如受试者留出）时它含留出受试者且 manifest 不符，参考线不再有效。
+        posthoc = bool(subdir) and name == CONTROL and opts.manifest_path == MANIFEST
         if not _needs_eval(output, posthoc):
             continue
         previous = None
@@ -736,6 +750,11 @@ def main():
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--save_root", default=SAVE_ROOT)
     parser.add_argument("--summary_dir", default=SUMMARY_DIR)
+    # 换数据划分（如受试者留出 val）时四项一起换：manifest、对应缓存、在该 train 上训练的冻结 base、run 目录前缀。
+    parser.add_argument("--manifest_path", default=MANIFEST)
+    parser.add_argument("--cache_dir", default=DEFAULT_CACHE_DIR)
+    parser.add_argument("--baseline_checkpoint", default=BASELINE)
+    parser.add_argument("--run_prefix", default=_RUN_PREFIX[0])
     parser.add_argument("--summary_only", action="store_true")
     parser.add_argument("--test_config", default=None,
                         help="Stage 3 判断后单独调用：只评估该配置与 A0 的 10000 step EMA test 终点；要求 summary_10000.json 判为候选采纳")
@@ -743,6 +762,7 @@ def main():
     parser.add_argument("--allow_cpu_for_smoke_test", action="store_true", help="仅冒烟测试：透传给训练与评估入口")
     parser.add_argument("--extra_train_args", nargs=argparse.REMAINDER, default=[], help="仅冒烟测试：追加到训练命令末尾")
     opts = parser.parse_args()
+    _RUN_PREFIX[0] = opts.run_prefix
     opts.smoke_args = ["--allow_cpu_for_smoke_test"] if opts.allow_cpu_for_smoke_test else []
     # --test_config 不依赖 --stage：否则默认 Stage 1 会让唯一一次 test 落在 5000 step 的筛选 checkpoint 上。
     steps = opts.steps or (FINAL_STEPS if (opts.stage == 3 or opts.test_config) else SCREEN_STEPS)
@@ -767,8 +787,9 @@ def main():
     failures = [] if opts.summary_only else run_jobs(configs, opts.seeds, steps, opts)
     if not opts.dry_run:
         # 汇总覆盖同一 step 数下所有已完成的配置（Stage 1 与 Stage 2 同为 5000 step，合在一张表里）。
-        known = sorted({entry[len("ntu2p_v2_"):].rsplit("_s", 1)[0] for entry in os.listdir(opts.save_root)
-                        if entry.startswith("ntu2p_v2_") and entry.endswith("_{}".format(steps))})
+        prefix = _RUN_PREFIX[0] + "_"
+        known = sorted({entry[len(prefix):].rsplit("_s", 1)[0] for entry in os.listdir(opts.save_root)
+                        if entry.startswith(prefix) and entry.endswith("_{}".format(steps))})
         ordered = list(OrderedDict.fromkeys([CONTROL] + configs + known))
         filename = "summary" if steps == SCREEN_STEPS else "summary_{}".format(steps)
         write_summary(collect(ordered, opts.seeds, steps, opts.save_root), steps, opts.seeds, opts.summary_dir, filename)
