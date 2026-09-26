@@ -264,6 +264,8 @@ def _extra_loss(details, target, obs, args, scales):
     terms = OrderedDict()
     if args.foot_loss_weight > 0:
         terms["foot"] = (float(args.foot_loss_weight), "foot", _foot_loss(details["pred"], target, obs))
+    # 开启 --loss_joint_subset 时，这里仍在全部 55 个关节上算 mse、却除以子集口径的 mse 常数，辅助项实际权重随之放大。
+    # 主线 A6-F-A5f0.05-A4-GH0.5-FD2 即按此口径训练（该项约占总 loss 1%）；改口径会改变主线配方，需另立对照。
     if args.kin_proj and args.free_aux_mse_weight > 0:
         if details.get("pred_free") is None:
             raise ValueError("--kin_proj 时模型必须在 details 中返回 pred_free")
