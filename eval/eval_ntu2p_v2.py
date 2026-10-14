@@ -38,7 +38,7 @@ from utils.ntu_smplx_2p_xyz import (
 DEFAULT_MANIFEST = "results/forecasting/ntu120_label/ntu2p_diffusion_o10_p50_phase0_gates/manifest_seed0.json"
 DEFAULT_BASELINE = "save/forecasting/ntu120_label/ntu2p_independent_single_person_o10_p50_cuda_retrain_s0_5000/model000005000.pt"
 DEFAULT_RETRIEVAL_BANK = "results/forecasting/ntu120_label/ntu2p_retrieval_bank/train_retrieval_bank.pt"
-EXTRA_VARIANTS = ("pred_free", "anchor", "posthoc_root_blend")
+EXTRA_VARIANTS = ("pred_free", "anchor", "posthoc_root_blend", "prior")
 L2_KEYS = ("xyz_mse", "xyz_mae", "mpjpe")
 # 步态相位（utils/ntu2p_naturalness.gait_phase_stats）：步行人左右踝前后分离与 GT 的逐段相关/RMSE、先迈脚准确率。
 GAIT_BIN_TAGS = tuple("f{:02d}_{:02d}".format(first, last) for first, last in GAIT_BINS)
@@ -156,6 +156,42 @@ def naturalness_block(obs, target, variants, chunk=NATURALNESS_CHUNK):
     return block
 
 
+def contact_geometry_metadata():
+    """把代理定义随结果保存，避免早期审计的不同掌心/躯干口径被误当作同一指标。"""
+    from utils.ntu2p_contact_graph import (
+        CONTACT_THRESHOLDS,
+        CONTACT_TEMPERATURE,
+        EVENT_EARLY_TOLERANCE,
+        EVENT_MAX_DELAY_FRAMES,
+        EVENT_SUSTAIN_FRAMES,
+        PALM_BASES,
+        RETREAT_SPEED_THRESHOLDS,
+        TORSO_SEGMENTS,
+        WRISTS,
+    )
+
+    return OrderedDict(
+        [
+            ("version", "wrist_or_palm2_torso6_v1"),
+            ("definition", "腕与 index1/pinky1 中点分别到对方躯干线段，取更近的距离；这是骨架中心距离代理"),
+            ("wrists", list(WRISTS)),
+            ("palm_bases", [list(joints) for joints in PALM_BASES]),
+            ("torso_segments", [list(segment) for segment in TORSO_SEGMENTS]),
+            ("distance_shape", "[窗口,帧,施动者,左右手,六个躯干段]"),
+            ("main_pushing_distance", "A 的两只手和六段的逐帧最近距离，按窗口及帧汇总 RMSE"),
+            ("pair_distance", "双手和六段全部距离的 RMSE，推人只取 A→B，其它动作取双向"),
+            ("contact_thresholds_m", list(CONTACT_THRESHOLDS)),
+            ("graph_contact_temperature_m", float(CONTACT_TEMPERATURE)),
+            ("retreat_speed_thresholds_mps", list(RETREAT_SPEED_THRESHOLDS)),
+            ("event_sustain_frames", int(EVENT_SUSTAIN_FRAMES)),
+            ("event_early_tolerance_frames", int(EVENT_EARLY_TOLERANCE)),
+            ("event_max_delay_frames", int(EVENT_MAX_DELAY_FRAMES)),
+            ("event_smoothing", "离线五点二项平滑；obs 侧独立估计已有接触和运动，未来不改变有效子集"),
+            ("event_scope", "辅助诊断，不作物理因果或硬采纳 gate"),
+        ]
+    )
+
+
 def _load_bank(args, state, device, needed):
     """检索模型或事后 root 混合需要检索库；路径优先用命令行，其次 checkpoint 记录，最后默认库。"""
     if not needed:
@@ -257,6 +293,7 @@ def evaluate(args):
     result = OrderedDict(
         [
             ("checkpoint", args.checkpoint),
+            ("manifest_path", args.manifest_path),
             ("split", args.split),
             ("num_samples", int(count)),
             ("sample_seed", int(args.seed)),
@@ -301,7 +338,15 @@ def evaluate(args):
         )
         if "posthoc_root_blend" in data:
             natural_variants["posthoc_root_blend"] = data["posthoc_root_blend"]
+        if "prior" in data:
+            natural_variants["prior"] = data["prior"]
         result["naturalness"] = naturalness_block(obs_all, target_all, natural_variants)
+    if getattr(model, "model_type", None) == "ntu2p_contact_graph_diffusion":
+        from utils.ntu2p_contact_graph import contact_metrics
+
+        contact_variants = OrderedDict(model=data["model"], prior=data["prior"], GT=target_all)
+        result["contact"] = contact_metrics(obs_all, target_all, contact_variants, data["actions"].reshape(-1))
+        result["contact_geometry"] = contact_geometry_metadata()
     if args.export_arrays:
         # 与 eval/analyze_ntu2p_naturalness.py --pred_file、sample/render_ntu2p_review_sheet.py --arrays 的格式兼容。
         methods = OrderedDict((key, data[key]) for key in ("model", "base") + EXTRA_VARIANTS if key in data)

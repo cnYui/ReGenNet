@@ -13,6 +13,8 @@
 
 ## 当前研究入口
 
+- 2026-10-14 接触图/双腿/DCT扩散本轮已完成：C1–C4与端到端F1–F3全部CUDA5000-step、EMA终点、subject-holdout val筛选均不采纳，主线仍为v2+FD2。FD2 mpjpe .172228；C组改善仅.57–.61%，图/腿流/扩散无增量；F组.176014/.175991/.176034（退化约2.2%），脚滑−21–22%但穿地.064→.081，接触距离亦变差。按预登记停止该路线，未做三seed复训或test。完整结果与固定23例、全12推人审查入口见 `docs/ai/context/20261014-153106-ntu2p-contact-graph-diffusion-final-result.md`；研究/公平性设计见 `docs/ai/context/20261014-112117-ntu2p-contact-graph-diffusion-design-and-plan.md`、`docs/ai/context/20261014-111722-ntu2p-contact-graph-diffusion-preregistration-amendment.md`、`docs/ai/context/20261014-120112-ntu2p-end-to-end-graphdiff-followup-design-and-plan.md`。DCT+图+扩散已有近邻，不能声称首创或两项核心问题已解决。
+- 本轮C4随机DDIM50不采纳（ES .1556不如OOF bootstrap .1284，jerk/穿地增加）；F3随机模式未评价，旧采样入口拒绝微调底座与原FD2残差库混用。F模型永久冻结原FD2 reference作为参照，66项CPU真实训练/兼容/梯度/EMA检查通过。正式六段掌腕代理与早期五段审计的事件子集不同，按 `docs/ai/context/20261014-115547-ntu2p-graphdiff-evaluation-review-fixes-result.md` 区分；图是关系交换、腿流是MLP纠正，无硬接触保证。最小事件积分器合成保证通过，但固定门替换root使推人精度退化，完整脚状态/IK未实现，见 `docs/ai/context/20261014-120042-ntu2p-event-controller-feasibility-result.md`。后续须共同设计手部到达、接触/自主运动辨别与root/脚约束，不能重复包装硬门或调宽采纳线。
 - 已完成主线：InterHuman 双人动作预测，固定 `150/30/120` 协议；详细结果见 `docs/ai/context/20260614-185753-regennet-key-context-extracted-from-agents.md` 及其引用文档。
 - 当前 NTU 双人 xyz 主线：必须使用真实双人 skeleton/xyz 口径，并将模型与 `copy-last` 同时评估；主指标为 paired `xyz_mse/xyz_mae/mpjpe` 等，动作分类、FID 和视频仅作辅助证据。
 - 新增独立单人学习型 baseline：复用 `NTULabelXYZTransformer`，`num_persons=1` 且 A/B 参数共享；每个人只看自己的 obs10 与动作标签，分别预测 future50 后拼回双人。它与 `copy-last`、联合双人 direct reference 分开报告，不能声称显式交互建模。

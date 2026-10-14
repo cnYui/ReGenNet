@@ -56,7 +56,14 @@ FOLLOWER_INDEX = _follower_index()
 
 def ramp_dct_basis(pred_len=PRED_LEN, num_coeffs=NUM_COEFFS, ramp_mode=RAMP_MODE, saturate_frames=RAMP_SATURATE_FRAMES):
     """[K,T] float64 斜坡 DCT 基；首帧整列为 0。"""
-    ramp = build_residual_ramp(pred_len, ramp_mode, saturate_frames).reshape(int(pred_len)).double()
+    if ramp_mode == "smoothstep":
+        if not 2 <= int(saturate_frames) <= int(pred_len):
+            raise ValueError("smoothstep 帧数必须在 [2,pred_len] 内")
+        phase = (torch.arange(int(pred_len), dtype=torch.float64) / float(int(saturate_frames) - 1)).clamp(0, 1)
+        # 起点的一阶导数为零，避免线性包络把大幅残差直接变为起步尖峰。
+        ramp = phase * phase * (3.0 - 2.0 * phase)
+    else:
+        ramp = build_residual_ramp(pred_len, ramp_mode, saturate_frames).reshape(int(pred_len)).double()
     basis = dct_matrix(int(pred_len), dtype=torch.float64)[: int(num_coeffs)] * ramp.unsqueeze(0)
     if not bool((basis[:, 0] == 0).all()):
         raise AssertionError("斜坡 DCT 基首帧必须严格为 0")
@@ -124,11 +131,13 @@ def v2_walk(obs_xyz, base_xyz, threshold=V2_WALK_DISPLACEMENT):
 class ResidualCodec(nn.Module):
     """系数 [B,2,K,66] <-> 个人系逐帧残差；只有非持久 buffer，不进 checkpoint。"""
 
-    def __init__(self, num_coeffs=NUM_COEFFS, pred_len=PRED_LEN):
+    def __init__(self, num_coeffs=NUM_COEFFS, pred_len=PRED_LEN, ramp_mode=RAMP_MODE, saturate_frames=RAMP_SATURATE_FRAMES):
         super(ResidualCodec, self).__init__()
         self.num_coeffs = int(num_coeffs)
         self.pred_len = int(pred_len)
-        basis = ramp_dct_basis(self.pred_len, self.num_coeffs)
+        self.ramp_mode = str(ramp_mode)
+        self.saturate_frames = int(saturate_frames)
+        basis = ramp_dct_basis(self.pred_len, self.num_coeffs, self.ramp_mode, self.saturate_frames)
         # torch 1.7 无 linalg.solve；BBᵀ 为 K×K 良态矩阵，直接求逆。
         encoder = torch.inverse(basis @ basis.t()) @ basis
         self.register_buffer("basis", basis, persistent=False)
@@ -141,8 +150,8 @@ class ResidualCodec(nn.Module):
                 ("num_coeffs", self.num_coeffs),
                 ("pred_len", self.pred_len),
                 ("channels", CHANNELS),
-                ("ramp_mode", RAMP_MODE),
-                ("ramp_saturate_frames", RAMP_SATURATE_FRAMES),
+                ("ramp_mode", self.ramp_mode),
+                ("ramp_saturate_frames", self.saturate_frames),
                 ("joints", list(GEN_JOINTS)),
                 ("followers", [[src, list(dst)] for src, dst in FOLLOWERS]),
                 ("ab_fallback", AB_FALLBACK),
