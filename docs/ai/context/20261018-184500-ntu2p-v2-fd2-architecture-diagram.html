@@ -1,0 +1,564 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NTU2P 双人动作预测模型架构</title>
+<!-- prune:keep -->
+<style>
+:root{
+  color-scheme:light dark;
+  --bg:#f4f5f8; --surface:#ffffff; --surface-2:#eef0f4; --line:#8f9aab; --border:#d6dbe3;
+  --text:#18212d; --muted:#566275; --faint:#8791a1;
+  --c-in:#5a6a80;   --t-in:#edf0f5;
+  --c-geo:#0e8c81;  --t-geo:#e3f4f2;
+  --c-emb:#2a6bdc;  --t-emb:#e6effd;
+  --c-mix:#7647dc;  --t-mix:#eee8fc;
+  --c-head:#c97500; --t-head:#fcf0dc;
+  --c-leg:#1a9645;  --t-leg:#e2f5e9;
+  --c-proj:#d12c58; --t-proj:#fce8ee;
+  --c-out:#26364b;  --t-out:#e8ecf2;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#0e1319; --surface:#161c24; --surface-2:#1d252f; --line:#66748a; --border:#2b3542;
+    --text:#e6ebf2; --muted:#9aa6b6; --faint:#6f7b8c;
+    --c-in:#92a3b9;   --t-in:#1a222c;
+    --c-geo:#33c6b8;  --t-geo:#112725;
+    --c-emb:#6f9eff;  --t-emb:#14213a;
+    --c-mix:#ab8dff;  --t-mix:#211a39;
+    --c-head:#f2a73c; --t-head:#2e2210;
+    --c-leg:#4fd47c;  --t-leg:#12281a;
+    --c-proj:#ff6f95; --t-proj:#33141e;
+    --c-out:#b8c6da;  --t-out:#1b2430;
+  }
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--text);
+  font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC","Noto Sans SC",system-ui,sans-serif}
+code,.shape,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
+code{font-size:.92em;background:var(--surface-2);padding:0 5px;border-radius:4px}
+a{color:var(--c-emb)}
+.wrap{max-width:1040px;margin:0 auto;padding:26px 16px 80px}
+
+.c-in{--c:var(--c-in);--t:var(--t-in)}
+.c-geo{--c:var(--c-geo);--t:var(--t-geo)}
+.c-emb{--c:var(--c-emb);--t:var(--t-emb)}
+.c-mix{--c:var(--c-mix);--t:var(--t-mix)}
+.c-head{--c:var(--c-head);--t:var(--t-head)}
+.c-leg{--c:var(--c-leg);--t:var(--t-leg)}
+.c-proj{--c:var(--c-proj);--t:var(--t-proj)}
+.c-out{--c:var(--c-out);--t:var(--t-out)}
+
+h1{margin:0 0 6px;font-size:26px;line-height:1.25}
+.sub{margin:0;color:var(--muted)}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 0}
+.chip{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:4px 10px;font-size:12.5px;color:var(--muted)}
+.chip b{color:var(--text);font-weight:600}
+
+.toc{position:sticky;top:0;z-index:10;display:flex;gap:6px;overflow-x:auto;white-space:nowrap;margin:18px -16px 0;padding:8px 16px;background:var(--bg);border-bottom:1px solid var(--border)}
+.toc a{flex:none;text-decoration:none;color:var(--muted);font-size:12.5px;padding:3px 11px;border:1px solid var(--border);border-radius:999px;background:var(--surface)}
+.toc a:hover{color:var(--text);border-color:var(--line)}
+
+section{margin-top:44px;scroll-margin-top:56px}
+h2{margin:0 0 4px;font-size:19px}
+.lead{margin:0 0 20px;color:var(--muted);font-size:13px}
+h2 + .lead{margin-top:2px}
+
+.strip{display:flex;flex-wrap:wrap;gap:6px 0;list-style:none;margin:0 0 18px;padding:0;align-items:center}
+.strip li{display:flex;align-items:center}
+.strip li span{background:var(--t);color:var(--c);border:1px solid var(--c);border-radius:999px;padding:2px 9px;font-size:12px;font-weight:600;white-space:nowrap}
+.strip li:not(:last-child)::after{content:"›";color:var(--faint);margin:0 4px}
+.notes{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.note{background:var(--surface);border:1px solid var(--border);border-top:3px solid var(--c);border-radius:8px;padding:9px 12px;font-size:12.5px;color:var(--muted)}
+.note h4{margin:0 0 3px;font-size:13px;color:var(--c)}
+
+.stage{position:relative;max-width:800px;margin:0 auto;background:var(--surface);border:1px solid var(--border);border-left:5px solid var(--c);border-radius:10px;padding:11px 16px 12px}
+.stage.dashed{border-style:dashed;border-left-style:solid}
+.stage .hd{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.n{flex:none;min-width:24px;height:24px;padding:0 6px;border-radius:12px;background:var(--c);color:var(--surface);font:700 12.5px/24px ui-sans-serif,system-ui,sans-serif;text-align:center}
+.stage h3{flex:1 1 140px;min-width:0;margin:0;font-size:15px;line-height:1.35}
+.stage h3 small{margin-left:6px;font:400 12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--muted)}
+.tags{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap}
+.tag{font-size:11.5px;line-height:1.5;padding:0 8px;border-radius:999px;background:var(--t);color:var(--c);border:1px solid var(--c);white-space:nowrap}
+.stage ul{margin:6px 0 0;padding:0;list-style:none;font-size:13px}
+.stage li{position:relative;padding-left:14px;margin:3px 0}
+.stage li::before{content:"";position:absolute;left:2px;top:.72em;width:5px;height:5px;border-radius:50%;background:var(--c);opacity:.85}
+.stage p{margin:6px 0 0;font-size:13px}
+.ref{font-size:12px;margin-left:4px;white-space:nowrap}
+.tap{display:inline-block;border:1px dashed var(--c);background:var(--t);color:var(--c);border-radius:6px;padding:0 8px;font-size:12px}
+.muted{color:var(--muted)}
+
+.shape{display:inline-block;background:var(--surface-2);border:1px solid var(--border);border-radius:999px;padding:0 9px;font-size:11.5px;line-height:1.6;color:var(--muted);white-space:nowrap}
+.link{position:relative;min-height:42px;max-width:800px;margin:0 auto;padding:9px 0 11px;display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:6px}
+.link::before{content:"";position:absolute;left:50%;top:0;bottom:8px;border-left:2px solid var(--line);transform:translateX(-1px)}
+.link::after{content:"";position:absolute;left:50%;bottom:0;transform:translateX(-50%);border-left:6px solid transparent;border-right:6px solid transparent;border-top:9px solid var(--line)}
+.link .shape{position:relative;z-index:1;background:var(--bg)}
+.link.noarrow::before{bottom:0}
+.link.noarrow::after{display:none}
+
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:800px;margin:0 auto}
+.pair .stage{max-width:none;margin:0}
+
+.fan{position:relative;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin:0 auto}
+.fan::before,.fan::after{content:"";position:absolute;left:calc((100% - 28px)/6);right:calc((100% - 28px)/6);border-top:2px solid var(--line)}
+.fan::before{top:0}
+.fan::after{bottom:0}
+.fan .col{position:relative;display:flex;flex-direction:column;padding:24px 0}
+.fan .col .stage{flex:1;max-width:none;margin:0}
+.fan .col::before,.fan .col::after{content:"";position:absolute;left:50%;height:24px;border-left:2px solid var(--line);transform:translateX(-1px)}
+.fan .col::before{top:0}
+.fan .col::after{bottom:0}
+.fan .col .tip{position:absolute;left:50%;top:15px;transform:translateX(-50%);border-left:5px solid transparent;border-right:5px solid transparent;border-top:8px solid var(--line)}
+
+.gallery{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.gallery .stage{max-width:none;margin:0}
+.mflow{display:flex;flex-direction:column;margin-top:8px}
+.mini{position:relative;background:var(--t);border:1px solid var(--c);border-radius:8px;padding:6px 10px;font-size:12.5px}
+.mini b{display:block;color:var(--c);font-size:12.5px}
+.mini .res{position:absolute;right:8px;top:6px;font-size:11px;color:var(--muted)}
+.minis{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.io{font-size:12px;color:var(--muted);text-align:center;margin:2px 0}
+.gap{position:relative;height:13px}
+.gap::before{content:"";position:absolute;left:50%;top:0;bottom:5px;border-left:2px solid var(--line);transform:translateX(-1px)}
+.gap::after{content:"";position:absolute;left:50%;bottom:0;transform:translateX(-50%);border-left:4px solid transparent;border-right:4px solid transparent;border-top:6px solid var(--line)}
+.params{margin-top:8px;font-size:12px;color:var(--muted)}
+
+.banner{background:var(--t-proj);border:1px solid var(--c-proj);border-radius:10px;padding:9px 14px;font-size:13px;margin-bottom:18px}
+.banner b{color:var(--c-proj)}
+.scroll{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th,td{padding:5px 8px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}
+th{color:var(--muted);font-weight:600;font-size:12px;white-space:nowrap}
+td.num{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;text-align:right;white-space:nowrap}
+table.nw td{white-space:nowrap}
+td.bad{color:var(--c-proj);font-weight:600}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 16px}
+.card h4{margin:0 0 6px;font-size:14px}
+.cols{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.foot ul{margin:6px 0 0;padding-left:18px;font-size:12.5px}
+.foot li{margin:3px 0}
+
+@media (max-width:900px){.notes{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:860px){.gallery,.cols{grid-template-columns:1fr}}
+@media (max-width:760px){
+  .fan{grid-template-columns:1fr;gap:0}
+  .fan::before,.fan::after,.fan .col::before,.fan .col::after,.fan .col .tip{display:none}
+  .fan .col{padding:0 0 12px}
+  .link.noarrow::before{bottom:8px}
+  .link.noarrow::after{display:block}
+}
+@media (max-width:620px){
+  h1{font-size:22px}
+  .pair{grid-template-columns:1fr}
+  .notes{grid-template-columns:1fr}
+  .minis{grid-template-columns:1fr}
+  .tags{margin-left:0}
+}
+@media print{.toc{display:none}.wrap{padding:0}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>NTU2P 双人动作预测 · 模型架构</h1>
+  <p class="sub">主线 <b>v2 + FD2</b>（<code>A6-F-A5f0.05-A4-GH0.5-FD2</code>）· 端到端确定性回归，<b>不是扩散模型</b> · 3,649,533 参数 · 源码与 checkpoint 核对于 2026-10-18</p>
+  <div class="chips">
+    <span class="chip"><b>obs 10 帧 → future 50 帧</b>（20 fps，2.5 s）</span>
+    <span class="chip"><b>双人 × 55</b> SMPL-X 关节 xyz</span>
+    <span class="chip"><b>26</b> 类动作标签</span>
+    <span class="chip">test mpjpe <b>0.1805 ± 0.0005</b>（3 seed，EMA 10k step）</span>
+  </div>
+</header>
+
+<nav class="toc">
+  <a href="#overview">总览</a><a href="#main">主线前向数据流</a><a href="#detail">模块展开</a><a href="#graph">图纠正器（未采纳）</a><a href="#loss">训练目标</a><a href="#verify">核对与边界</a>
+</nav>
+
+<section id="overview">
+  <h2>总览</h2>
+  <p class="lead">一次前向：观测 → 场景规范系 → DCT 频率 token → 6 层 Mixer → 三个零初始化输出头 → 残差 DCT 解码 → 加回末帧 → 骨架投影。</p>
+  <ol class="strip">
+    <li class="c-in"><span>obs + 动作</span></li>
+    <li class="c-geo"><span>1 规范化</span></li>
+    <li class="c-emb"><span>2 DCT token</span></li>
+    <li class="c-mix"><span>3 Mixer ×6</span></li>
+    <li class="c-head"><span>4 三个输出头</span></li>
+    <li class="c-head"><span>5 IDCT × ramp</span></li>
+    <li class="c-head"><span>6 组装 + 刚体手</span></li>
+    <li class="c-proj"><span>7 + obs_last</span></li>
+    <li class="c-proj"><span>8 骨架投影</span></li>
+    <li class="c-out"><span>future 50 帧</span></li>
+  </ol>
+  <div class="notes">
+    <div class="note c-geo"><h4>规范系</h4>双人共享场景系（原点 = 双人 pelvis 中点，+X = A→B 水平连线），B 再转到"朝向对方系"，相对几何直接成为坐标；A6 设计里最强的归纳偏置。</div>
+    <div class="note c-head"><h4>残差 DCT</h4>输出是相对观测末帧的低阶 DCT 残差。输出头零初始化、ramp 首帧为 0，初始输出逐位等于 copy-last。</div>
+    <div class="note c-proj"><h4>刚体手 + 骨架投影</h4>手指 = 手腕 + 手旋转作用于观测末帧偏移；末端投影固定骨长，对应 ReGenNet 的 SMPL-X 运动学表示（输出为合法骨架）。</div>
+    <div class="note c-leg"><h4>腿部专用流</h4>A6 诊断：腿在共享主干梯度里仅约 3%（手指约 83%），所以腿由独立流预测：输入 detach，梯度不回主干。</div>
+  </div>
+</section>
+
+<section id="main">
+  <h2>主线前向数据流</h2>
+  <p class="lead">张量形状为实测（B 为 batch）。两个人共享全部权重，由 role embedding 区分施动 / 受动。</p>
+
+  <div class="pair">
+    <article class="stage c-in">
+      <div class="hd"><span class="n">in</span><h3>obs_xyz</h3><div class="tags"><span class="tag">相机系</span></div></div>
+      <p><span class="shape">[B,10,2,55,3]</span> 观测 10 帧；人物 0 = A（施动）、1 = B（受动）；55 = SMPL-X 25 个躯干 / 头关节 + 双手各 15 个指节。</p>
+    </article>
+    <article class="stage c-in">
+      <div class="hd"><span class="n">in</span><h3>action</h3></div>
+      <p><span class="shape">[B]</span> 26 类 NTU120 双人动作标签。在 2、3、4c 中以 <code>cond</code> 嵌入进入，不经过规范化。</p>
+    </article>
+  </div>
+  <div class="link"><span class="shape">obs_xyz [B,10,2,55,3]</span></div>
+
+  <article class="stage c-geo">
+    <div class="hd"><span class="n">1</span><h3>场景规范化 + 朝向对方系<small>canonical_frame</small></h3><div class="tags"><span class="tag">无参数</span></div></div>
+    <ul>
+      <li>原点：观测末帧双人 pelvis 中点；+Y：重力"上"，由观测 neck−pelvis 估计（偏离数据集常量 &gt;30° 时回退常量）</li>
+      <li>+X：A→B pelvis 连线的水平分量；双人水平距离 &lt;0.1 m 时回退水平化的相机 x 轴（配置名里的 <code>F</code>）；+Z = X × Y</li>
+      <li>朝向对方系：B 绕竖直轴转 180°（x、z 取反），"走向对方"对 A/B 同号</li>
+      <li>参数只取自观测，可精确反变换</li>
+    </ul>
+  </article>
+  <div class="link"><span class="shape">obs_person [B,10,2,55,3]</span><span class="shape">rel_geometry [B,2,6]</span></div>
+
+  <article class="stage c-emb">
+    <div class="hd"><span class="n">2</span><h3>DCT 位移 token 化<small>_embed</small></h3><div class="tags"><span class="tag">112,896 参数</span></div></div>
+    <ul>
+      <li>位移历史 <code>x_t − x_last</code>（10 帧 × 165）→ DCT 取前 30 阶（60 帧窗口基，未来段补零）→ <code>disp_proj</code> Linear(165→256)</li>
+      <li>静态条件对 30 个 token 广播相加：末帧姿态 − pelvis（165）→ <code>pose_proj</code>；相对几何（6）→ <code>geometry_proj</code>；<code>cond = action_emb(26→64) + role_emb(2→64)</code> → <code>cond_proj</code></li>
+      <li>可学习频率位置 <code>coeff_pos [1,1,30,256]</code></li>
+      <li>每人 30 个频率 token，A/B 共享权重</li>
+    </ul>
+  </article>
+  <div class="link"><span class="shape">hidden [B,2,30,256]</span></div>
+
+  <article class="stage c-mix">
+    <div class="hd"><span class="n">3</span><h3>InterMixer 主干 × 6<small>_MixerBlock</small></h3><div class="tags"><span class="tag">2,579,916 参数</span><a class="ref" href="#d1">展开 D1 ↓</a></div></div>
+    <ul>
+      <li>每块三步 pre-LN 残差：沿频率 token 轴的时间混合 → 动作 / 角色 FiLM 调制的通道 MLP → 零初始化的人物混合（读取对方 token）</li>
+      <li>隐藏维 256，MLP 比 2，dropout 0.1；<code>cond = SiLU(action_emb + role_emb)</code> 作 FiLM 条件</li>
+    </ul>
+  </article>
+  <div class="link noarrow"><span class="shape">out_norm（LayerNorm 256）→ hidden [B,2,30,256]</span></div>
+
+  <div class="fan">
+    <div class="col"><i class="tip"></i>
+      <article class="stage c-head">
+        <div class="hd"><span class="n">4a</span><h3>root 头</h3></div>
+        <ul>
+          <li>Linear(256→3)，作用于<b>前 8 个</b>频率 token</li>
+          <li>零初始化 · 771 参数</li>
+        </ul>
+        <p><span class="shape">root DCT [B,2,8,3]</span></p>
+      </article>
+    </div>
+    <div class="col"><i class="tip"></i>
+      <article class="stage c-head">
+        <div class="hd"><span class="n">4b</span><h3>local 头</h3></div>
+        <ul>
+          <li>Linear(256→78)，作用于<b>前 20 个</b>频率 token</li>
+          <li>78 = 24 个非 pelvis 躯干关节 ×3 + 双手各 1 个轴角 ×3</li>
+          <li>零初始化 · 20,046 参数</li>
+        </ul>
+        <p><span class="shape">local DCT [B,2,20,78]</span></p>
+      </article>
+    </div>
+    <div class="col"><i class="tip"></i>
+      <article class="stage c-leg">
+        <div class="hd"><span class="n">4c</span><h3>腿部专用流 GH</h3><a class="ref" href="#d2">展开 D2 ↓</a></div>
+        <ul>
+          <li>个人朝向系下预测 8 个腿关节（髋 / 膝 / 踝 / 脚掌 × 左右）</li>
+          <li>输入 detach，梯度不回主干 · 935,392 参数</li>
+        </ul>
+        <p><span class="shape">leg DCT [B,2,20,8,3]</span></p>
+      </article>
+    </div>
+  </div>
+  <div class="link"><span class="shape">三路 DCT 系数</span></div>
+
+  <article class="stage c-head">
+    <div class="hd"><span class="n">5</span><h3>IDCT × ramp</h3><div class="tags"><span class="tag">无参数</span></div></div>
+    <ul>
+      <li>root（8 阶）、local（20 阶）、腿（20 阶）各自 IDCT 回 50 帧；基取自 60 帧窗口 DCT，输入输出同序号同频率</li>
+      <li>乘 ramp = <code>[0, .2, .4, .6, .8, 1, 1, …]</code>（saturate，5 帧）→ 首帧残差恒为 0</li>
+    </ul>
+  </article>
+  <div class="link"><span class="shape">root [B,50,2,3]</span><span class="shape">local [B,50,2,78]</span><span class="shape">leg [B,50,2,8,3]</span></div>
+
+  <article class="stage c-head">
+    <div class="hd"><span class="n">6</span><h3>组装 55 关节残差 + 刚体手<small>_decode</small></h3><div class="tags"><span class="tag">无参数</span><a class="ref" href="#d4">展开 D4 ↓</a></div></div>
+    <ul>
+      <li>pelvis 局部位移恒为 0，只随 root 平移；其余 24 个关节 = 局部 + root，腿关节行<b>替换</b>为腿流输出（主干对这些行的梯度为 0）</li>
+      <li>手指 30 个关节 = 手腕 Δ + R(ω)·o − o（ω 为 local 头的手轴角，o 为观测末帧"指节 − 手腕"偏移，Rodrigues）</li>
+      <li>朝向对方系 → 场景系 → 乘 Rᵀ 旋回相机系</li>
+    </ul>
+  </article>
+  <div class="link"><span class="shape">Δ [B,50,2,55,3]</span></div>
+
+  <article class="stage c-head">
+    <div class="hd"><span class="n">7</span><h3>残差相加<small>pred_free = obs_last + Δ</small></h3></div>
+    <ul>
+      <li>跳连：<span class="tap">obs_last [B,2,55,3] 相机系末帧</span>；只旋转残差、不加平移，Δ = 0 时逐位等于 copy-last</li>
+      <li>训练时 <code>pred_free</code>（投影前）另有 0.1 × MSE 辅助项</li>
+    </ul>
+  </article>
+  <div class="link"><span class="shape">pred_free [B,50,2,55,3]</span></div>
+
+  <article class="stage c-proj">
+    <div class="hd"><span class="n">8</span><h3>可微骨架投影<small>SkeletonProjector（A4）</small></h3><div class="tags"><span class="tag">无参数</span><a class="ref" href="#d3">展开 D3 ↓</a></div></div>
+    <ul>
+      <li>骨长与手部模板取自 <span class="tap">obs_last</span>：单子节点沿预测方向取固定骨长；四肢用解析两骨 IK；多子节点用加权 Procrustes；手为刚体 Procrustes</li>
+      <li>效果：身体骨长误差 0、手为刚体；全程 float64、无迭代优化</li>
+    </ul>
+  </article>
+  <div class="link"><span class="shape">pred [B,50,2,55,3]</span></div>
+
+  <article class="stage c-out">
+    <div class="hd"><span class="n">out</span><h3>pred_xyz</h3><div class="tags"><span class="tag">相机系</span></div></div>
+    <p>未来 50 帧（20 fps，2.5 s）双人 55 关节 xyz；评估取权重 EMA（0.999）的 10000 step 终点。</p>
+  </article>
+
+  <div class="card" style="max-width:800px;margin:18px auto 0">
+    <h4>零初始化清单</h4>
+    <p class="muted" style="margin:0;font-size:12.5px">每块的 FiLM 与 <code>person_mix</code>、<code>root_head</code>、<code>local_head</code>、腿流最后一层。配合 ramp 首帧为 0，初始输出逐位等于 copy-last；训练只学习相对"原地不动"的偏离，首帧误差恒为 0。</p>
+  </div>
+</section>
+
+<section id="detail">
+  <h2>模块展开</h2>
+  <p class="lead">D1–D4 对应主线里带"展开"标记的阶段。</p>
+  <div class="gallery">
+
+    <article class="stage c-mix" id="d1">
+      <div class="hd"><span class="n">D1</span><h3>Mixer 块（× 6）</h3><div class="tags"><span class="tag">429,986 / 块</span></div></div>
+      <div class="mflow">
+        <div class="io">h <span class="shape">[B,2,30,256]</span></div>
+        <div class="gap"></div>
+        <div class="mini"><b>① 时间混合</b>LayerNorm → Linear(30→30)，沿 30 个频率 token 混合<span class="res">+ h</span></div>
+        <div class="gap"></div>
+        <div class="mini"><b>② 通道 MLP + FiLM</b>LayerNorm → ×(1+γ)+β → Linear(256→512) → GELU → Dropout → Linear(512→256)<br>(γ, β) = Linear(64→512)(SiLU(cond))，零初始化<span class="res">+ h</span></div>
+        <div class="gap"></div>
+        <div class="mini"><b>③ 人物混合</b>LayerNorm → Linear([h_self ; h_other] 512→256)；A/B 共享，零初始化<span class="res">+ h</span></div>
+        <div class="gap"></div>
+        <div class="io">h′ <span class="shape">[B,2,30,256]</span></div>
+      </div>
+      <p class="params">每块参数：film 33,280 · channel_mlp 262,912 · person_mix 131,328 · time_mix 930 · 3 个 LayerNorm 1,536</p>
+    </article>
+
+    <article class="stage c-leg" id="d2">
+      <div class="hd"><span class="n">D2</span><h3>腿部专用流 GH</h3><div class="tags"><span class="tag">935,392 参数</span></div></div>
+      <p class="muted" style="margin:6px 0 0;font-size:12.5px">所有输入在<b>个人朝向系</b>（前 / 左 / 上；前向 = 观测末 3 帧朝向之和的水平分量）。</p>
+      <div class="mflow">
+        <div class="minis">
+          <div class="mini"><b>腿局部位置 + 速度</b>8 个腿关节相对 pelvis：10 帧位置 + 9 帧速度（m/s）<br><span class="shape">456</span></div>
+          <div class="mini"><b>pelvis 轨迹 + root 预测</b>10 帧 pelvis 位移 + 主干 root DCT（8 阶，detach）<br><span class="shape">54</span></div>
+          <div class="mini"><b>ctx（detach）</b>out_norm(hidden) 对 30 个 token 取均值<br><span class="shape">256</span></div>
+          <div class="mini"><b>cond（detach）</b>SiLU(action_emb + role_emb)<br><span class="shape">64</span></div>
+        </div>
+        <div class="gap"></div>
+        <div class="mini"><b>4 个 Linear（→512）相加 → LayerNorm(512)</b>leg_in 233,984 · root_in 27,648 · ctx_in 131,072 · cond_in 32,768</div>
+        <div class="gap"></div>
+        <div class="mini"><b>GELU → Linear(512→512) → GELU → Linear(512→480)</b>最后一层零初始化</div>
+        <div class="gap"></div>
+        <div class="io"><span class="shape">[B,2,20,8,3]</span> 腿局部残差的 DCT 系数</div>
+        <div class="gap"></div>
+        <div class="mini"><b>IDCT × ramp → 旋回朝向对方系 → 替换 local 中 8 个腿关节行</b></div>
+      </div>
+      <p class="params">为什么独立：步态相位只与"前后"有关（个人系），并以 root 预测为条件让步伐时机与 root 速度耦合；监督为腿局部位置 + ≤2 Hz 低通速度（各 0.5）。</p>
+    </article>
+
+    <article class="stage c-proj" id="d3">
+      <div class="hd"><span class="n">D3</span><h3>SkeletonProjector 规则</h3><div class="tags"><span class="tag">自上而下 · 按层级批处理</span></div></div>
+      <div class="scroll"><table>
+        <tr><th>对象</th><th>做法</th></tr>
+        <tr><td>root</td><td>取预测 pelvis</td></tr>
+        <tr><td>单子节点（脊柱链、颈、锁骨、脚掌…）</td><td>子 = 父 + 骨长 · unit(预测子 − 父)：预测点到"以父为球心、骨长为半径"球面的最近点</td></tr>
+        <tr><td>四肢（髋-膝-踝、肩-肘-腕）</td><td>解析两骨 IK：末端可达时精确保持预测位置；肘 / 膝在两球交线圆上取离预测最近点</td></tr>
+        <tr><td>多子节点（pelvis、spine3、head）</td><td>加权 Procrustes 求全局旋转 G，子 = 父 + G · 模板偏移</td></tr>
+        <tr><td>手（每手 15 指节）</td><td>以 obs_last 的指节相对手腕构型为刚体模板，Procrustes 对齐预测点云后整体放置</td></tr>
+      </table></div>
+      <p class="params">骨长与模板取自 obs_last（随样本变化，不依赖固定静息骨架）；Horn 四元数法求旋转，反向用最优性条件闭式解；float64。</p>
+    </article>
+
+    <article class="stage c-head" id="d4">
+      <div class="hd"><span class="n">D4</span><h3>刚体手与坐标回转</h3></div>
+      <div class="mflow">
+        <div class="mini"><b>手指（每手 15 个）</b><code>Δ_j = Δ_wrist + R(ω_h)·o_j − o_j</code><br>o_j = obs_last 中 x_j − x_wrist；ω_h ∈ ℝ³ 为 local 头输出（已乘 ramp）</div>
+        <div class="gap"></div>
+        <div class="mini"><b>回转链</b>朝向对方系 → B 的 x、z 取反（对合）→ 场景规范系 → Rᵀ → 相机系</div>
+        <div class="gap"></div>
+        <div class="mini"><b>落到相机系末帧上</b><code>pred_free = obs_last + Δ_cam</code>：只旋转残差，Δ = 0 时逐位等于 copy-last</div>
+      </div>
+      <p class="params">全部 3×3 变换逐元素乘加实现，避开 Ampere 上 TF32 的 1e-4 m 级误差；ω = 0 时 Rodrigues 严格恒等。</p>
+    </article>
+
+  </div>
+</section>
+
+<section id="graph">
+  <h2>接触事件图 + 腿相位 + DCT 扩散纠正器</h2>
+  <p class="lead">2026-10-14 研究：在冻结（C）或微调（F）的 v2 + FD2 先验之上加一个残差纠正器。</p>
+  <div class="banner"><b>未采纳 · 研究记录。</b>7 个候选在受试者留出 val（H-val 247 窗）上按预登记规则全部未通过采纳线，主线仍为 v2 + FD2。图是信息交换而非接触硬状态机，腿头是 MLP 而非步态相位振子；不能据此声称"规律迈步"或"先接触再后退"已解决，也不能声称组合首创。</div>
+
+  <article class="stage c-in dashed">
+    <div class="hd"><span class="n">G1</span><h3>先验：主线 v2 + FD2 InterMixer</h3></div>
+    <ul>
+      <li>C1–C4：冻结（<code>requires_grad=False</code>），只训练纠正器 496,867 参数</li>
+      <li>F1–F3：解冻，InterMixer lr 3e-5（纠正器 3e-4）；另存冻结的原 FD2 作 <code>reference</code>，评估对照不得用微调后的底座冒充</li>
+    </ul>
+  </article>
+  <div class="link"><span class="shape">draft [B,50,2,55,3]</span></div>
+
+  <article class="stage c-geo dashed">
+    <div class="hd"><span class="n">G2</span><h3>prepare：草稿 → 纠正器输入</h3></div>
+    <ul>
+      <li><code>frames</code>：场景规范系 + 个人朝向系（与腿流同一个系）</li>
+      <li><code>history [B,2,22,57]</code>：22 个身体关节 ×（10 帧位置 30 + 9 帧速度 27）</li>
+      <li><code>draft_local</code>、<code>velocity</code> <span class="shape">[B,50,2,22,3]</span>：草稿的 root + 相对 root 局部轨迹及其帧差 × 20；<code>draft_scene</code>：草稿在场景规范系</li>
+    </ul>
+  </article>
+  <div class="link"><span class="shape">history</span><span class="shape">draft_local</span><span class="shape">velocity</span></div>
+
+  <article class="stage c-emb dashed">
+    <div class="hd"><span class="n">G3</span><h3>节点 token</h3><div class="tags"><span class="tag">hidden 96</span></div></div>
+    <ul>
+      <li><code>input_embed</code> Linear(9→96)，输入 = [当前系数解码状态 3, draft_local 3, velocity 3]</li>
+      <li>+ <code>obs_embed</code> MLP(57→96→96) + action / role / joint / 扩散时间步 embedding + <code>frame_embed [1,50,1,1,96]</code></li>
+    </ul>
+  </article>
+  <div class="link"><span class="shape">[B,50,2,22,96]</span></div>
+
+  <article class="stage c-geo dashed">
+    <div class="hd"><span class="n">G4</span><h3>接触事件图特征</h3><div class="tags"><span class="tag">仅 graph 开关</span></div></div>
+    <ul>
+      <li>几何 = 草稿 + trust(t) × 当前状态：高噪声时只信先验，低噪声时才重新估计接触</li>
+      <li>手腕 / 掌心（index1、pinky1 中点）到对方 6 条躯干线段的最近距离 → 软接触 σ((0.20 − d)/0.05) → 因果记忆 1 − ∏(1 − p) → 邻接 <code>[B,50,2,22,22]</code></li>
+      <li><code>events [B,50,2,22,6]</code> → <code>event_embed</code> Linear(6→96)，加到节点 token</li>
+    </ul>
+  </article>
+  <div class="link"><span class="shape">[B,50,2,22,96]</span><span class="shape">adjacency [B,50,2,22,22]</span></div>
+
+  <article class="stage c-mix dashed">
+    <div class="hd"><span class="n">G5</span><h3>EventGraphBlock × 3<small>dilation 1 / 2 / 4</small></h3><div class="tags"><span class="tag">197,568 参数</span></div></div>
+    <ul>
+      <li>空间：LayerNorm → Linear(3×96→96)，输入 = [骨架图聚合 | 对方均值 | 接触图聚合]；graph 关闭时骨架图换成关节均值、接触项为 0</li>
+      <li>时间：depthwise Conv1d（kernel 5，dilation 1 / 2 / 4）；FFN 96→192→96；dropout 0.1</li>
+    </ul>
+  </article>
+  <div class="link"><span class="shape">out: LN + Linear(96→3)</span><span class="shape">channels [B,50,2,66]</span></div>
+
+  <article class="stage c-head dashed">
+    <div class="hd"><span class="n">G6</span><h3>输出 → DCT 系数 + 腿相位纠正</h3></div>
+    <ul>
+      <li>最小二乘 ramp-DCT 编码：16 阶，smoothstep 8 帧 → <code>[B,2,16,66]</code>（66 = root 3 + 21 关节局部 63）</li>
+      <li>phase 开关：腿 MLP（腿历史 8×57 + root 计划 50×3 = 606 → 256 → 384）加到 8 个腿关节通道的系数上；254,080 参数</li>
+    </ul>
+  </article>
+  <div class="link"><span class="shape">coeffs [B,2,16,66]</span></div>
+
+  <article class="stage c-proj dashed">
+    <div class="hd"><span class="n">G7</span><h3>解码 + 骨架投影</h3></div>
+    <ul>
+      <li>× σ（米）→ 解码（手指随手腕、下颌 / 眼随头）→ 相机系 → <code>free = draft + Δ</code> → SkeletonProjector → 首帧置为 obs_last</li>
+      <li>确定性端点 = (t = 999, x = 0) 的点预测；C4 / F3 另可用 ReGenNet 余弦扩散的 DDIM50（η = 0）采样</li>
+    </ul>
+  </article>
+  <div class="link"><span class="shape">pred [B,50,2,55,3]</span></div>
+
+  <div class="cols">
+    <div class="card">
+      <h4>七个候选与结果</h4>
+      <div class="scroll"><table class="nw">
+        <tr><th>候选</th><th>图</th><th>腿相位</th><th>去噪辅助</th><th>底座</th><th style="text-align:right">Δmpjpe vs FD2</th></tr>
+        <tr><td>C1</td><td>–</td><td>–</td><td>–</td><td>冻结</td><td class="num">−0.61%</td></tr>
+        <tr><td>C2</td><td>✓</td><td>–</td><td>–</td><td>冻结</td><td class="num">−0.57%</td></tr>
+        <tr><td>C3</td><td>✓</td><td>✓</td><td>–</td><td>冻结</td><td class="num">−0.57%</td></tr>
+        <tr><td>C4</td><td>✓</td><td>✓</td><td>✓</td><td>冻结</td><td class="num">−0.58%</td></tr>
+        <tr><td>F1</td><td>–</td><td>–</td><td>–</td><td>微调</td><td class="num bad">+2.20%</td></tr>
+        <tr><td>F2</td><td>✓</td><td>✓</td><td>–</td><td>微调</td><td class="num bad">+2.18%</td></tr>
+        <tr><td>F3</td><td>✓</td><td>✓</td><td>✓</td><td>微调</td><td class="num bad">+2.21%</td></tr>
+      </table></div>
+      <p class="params">H-val 247 窗、单 seed、5000 step、EMA 终点；FD2 参照 mpjpe .172228。采纳线为 mpjpe 改善 ≥ 0.8% 或定向改善 ≥ 10% 且过护栏：C 组未达线，F 组脚滑降约 21–22% 但穿地帧比 .064 → .081，超出护栏。结构相同，开关只改变数据流与损失；F2 相对 F1 仅 −.013%，图 / 腿流 / 扩散均无增量证据。</p>
+    </div>
+    <div class="card">
+      <h4>纠正器的训练目标</h4>
+      <ul style="margin:0;padding-left:18px;font-size:12.5px">
+        <li>主损失、脚接触与腿步态项同 FD2；每步两次纠正器 forward（点预测 + 带噪系数重建）</li>
+        <li>+ 掌腕—躯干距离损失 0.1</li>
+        <li>+ 左右踝前后分离的低通相位损失 0.1</li>
+        <li>+ 系数 x0 去噪 MSE 0.1（余弦 1000 步；非扩散候选保持同样目标但不加噪）</li>
+        <li>C4 的 DDIM50 随机评价 ES .1556，不如 OOF bootstrap 的 .1284，不采纳；F3 随机模式未评价</li>
+      </ul>
+      <p class="params">完整结果：<code>20261014-153106-ntu2p-contact-graph-diffusion-final-result.md</code></p>
+    </div>
+  </div>
+</section>
+
+<section id="loss">
+  <h2>训练目标与优化（主线）</h2>
+  <p class="lead">取自主线 run 的 <code>args.json</code>。所有主损失项都除以 copy-last 在训练集上的同名误差（<code>--loss_scale_normalize</code>）。</p>
+  <div class="cols">
+    <div class="card">
+      <h4>主损失 · FD2 关节子集（身体 25 + 每手 index1 / pinky1，共 29 个关节）</h4>
+      <div class="scroll"><table>
+        <tr><th>项</th><th style="text-align:right">权重</th><th>含义</th></tr>
+        <tr><td>mse</td><td class="num">1.0</td><td>位置 MSE</td></tr>
+        <tr><td>mae</td><td class="num">0.1</td><td>L1</td></tr>
+        <tr><td>root</td><td class="num">0.1</td><td>pelvis 轨迹</td></tr>
+        <tr><td>local</td><td class="num">1.0</td><td>相对 root 的局部姿态</td></tr>
+        <tr><td>velocity / acceleration</td><td class="num">0.2 / 0.1</td><td>一阶 / 二阶差分</td></tr>
+        <tr><td>long / final</td><td class="num">0.2 / 0.2</td><td>长 horizon 段 / 末帧</td></tr>
+        <tr><td>inter</td><td class="num">0.01</td><td>4 组跨人腕—腕距离（归一化下近似无作用）</td></tr>
+        <tr><td>local_velocity</td><td class="num">1.0</td><td>局部姿态帧差</td></tr>
+        <tr><td>dct_low_amplitude</td><td class="num">1.0</td><td>≤1 Hz（k1–5）DCT 幅度</td></tr>
+        <tr><td>delta_reg</td><td class="num">0.01</td><td>mean(Δ²)，不归一化</td></tr>
+      </table></div>
+    </div>
+    <div class="card">
+      <h4>辅助项 · 全部 55 个关节</h4>
+      <div class="scroll"><table>
+        <tr><th>项</th><th style="text-align:right">权重</th><th>含义</th></tr>
+        <tr><td>foot</td><td class="num">0.05</td><td>GT 接触帧上预测脚的水平速度²（以纯滑行参考归一）</td></tr>
+        <tr><td>free_aux_mse</td><td class="num">0.1</td><td>骨架投影前 <code>pred_free</code> 的 MSE</td></tr>
+        <tr><td>leg_pos</td><td class="num">0.5</td><td>腿局部位置 MSE</td></tr>
+        <tr><td>leg_lpvel</td><td class="num">0.5</td><td>≤2 Hz 低通腿轨迹的帧差速度</td></tr>
+        <tr><td>dct_mid_nonleg</td><td class="num">1.0</td><td>47 个非腿关节 1.2–2 Hz（k6–10）DCT 幅度；腿移出，改由上两行相位敏感项监督</td></tr>
+      </table></div>
+      <h4 style="margin-top:12px">优化</h4>
+      <p class="muted" style="margin:0;font-size:12.5px">AdamW，lr 3e-4 恒定，weight decay 1e-4，batch 8，梯度裁剪 1.0，10,000 step，EMA 0.999（报告 EMA 终点）；无几何增广；GPU 常驻 xyz 序列缓存 + 随机截窗；显式 <code>cuda:0</code>。</p>
+    </div>
+  </div>
+</section>
+
+<section id="verify" class="foot">
+  <h2>核对与边界</h2>
+  <div class="cols">
+    <div class="card">
+      <h4>怎么核对的</h4>
+      <ul>
+        <li>在 CPU 上实例化真实 checkpoint <code>save/forecasting/ntu120_label/ntu2p_v2_A6-F-A5f0.05-A4-GH0.5-FD2_s0_10000/ema/model000010000.pt</code>：总参数 3,649,533 = checkpoint 的 <code>num_params</code>，各模块参数之和逐项相加相等</li>
+        <li>张量形状来自前向钩子实测（B=2）；图纠正器取 C4 / F3 的 5000 step EMA checkpoint，可训练参数 496,867 与 4,146,400</li>
+        <li>源码：<code>model/forecasting_ntu2p_intermixer.py</code>、<code>utils/ntu2p_canonical.py</code>、<code>utils/ntu2p_kinematic_projection.py</code>、<code>utils/ntu2p_gait_losses.py</code>、<code>model/forecasting_ntu2p_graphdiff.py</code>、<code>utils/ntu2p_contact_graph.py</code>、<code>utils/ntu2p_residual_codec.py</code>、<code>train/train_ntu2p_v2.py</code></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>解释边界</h4>
+      <ul>
+        <li>当前主线是确定性回归（DCT-Mixer + 骨架投影），不是扩散模型；扩散路线在本任务上没有带来提升</li>
+        <li>person_mix 与相对几何给了跨人信息，但没有"屏蔽对方观测"的同架构消融，L2 提升不能归因于交互建模</li>
+        <li>test mpjpe 0.1805 ± 0.0005 是 3 个 seed 的均值 ± 样本标准差；选型只用受试者留出 val，test 只评估一次</li>
+        <li>结果来源：<code>20260926-005610-ntu2p-v2-final-result.md</code>、<code>20260926-165932-ntu2p-finger-dedup-result.md</code></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+</div>
+</body>
+</html>
