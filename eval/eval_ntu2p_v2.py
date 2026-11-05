@@ -38,7 +38,7 @@ from utils.ntu_smplx_2p_xyz import (
 DEFAULT_MANIFEST = "results/forecasting/ntu120_label/ntu2p_diffusion_o10_p50_phase0_gates/manifest_seed0.json"
 DEFAULT_BASELINE = "save/forecasting/ntu120_label/ntu2p_independent_single_person_o10_p50_cuda_retrain_s0_5000/model000005000.pt"
 DEFAULT_RETRIEVAL_BANK = "results/forecasting/ntu120_label/ntu2p_retrieval_bank/train_retrieval_bank.pt"
-EXTRA_VARIANTS = ("pred_free", "anchor", "posthoc_root_blend", "prior")
+EXTRA_VARIANTS = ("pred_free", "anchor", "posthoc_root_blend", "prior", "endpoint")
 L2_KEYS = ("xyz_mse", "xyz_mae", "mpjpe")
 # 步态相位（utils/ntu2p_naturalness.gait_phase_stats）：步行人左右踝前后分离与 GT 的逐段相关/RMSE、先迈脚准确率。
 GAIT_BIN_TAGS = tuple("f{:02d}_{:02d}".format(first, last) for first, last in GAIT_BINS)
@@ -242,6 +242,14 @@ def evaluate(args):
         if not hasattr(model, "canonical_ab_fallback"):
             raise ValueError("该模型不使用场景规范系，不能覆盖 canonical_ab_fallback")
         model.canonical_ab_fallback = args.override_canonical_ab_fallback
+    is_flow = getattr(model, "model_type", None) == "ntu2p_jit_flow"
+    if is_flow:
+        # 读出方式与采样设置只影响推理；样本噪声来自模型自带的 CPU generator，固定 seed 下逐位可复现。
+        model.readout = args.flow_readout
+        model.num_samples = int(args.flow_samples)
+        model.nfe_steps = int(args.flow_nfe)
+        model.solver = args.flow_solver
+        model.reset_sampler(args.flow_sample_seed)
     needs_retrieval = int(getattr(model, "retrieval_k", 0)) > 0
     bank, bank_path = _load_bank(args, checkpoint_state, device, needs_retrieval or args.posthoc_root_blend > 0)
     if needs_retrieval:
@@ -338,15 +346,28 @@ def evaluate(args):
         )
         if "posthoc_root_blend" in data:
             natural_variants["posthoc_root_blend"] = data["posthoc_root_blend"]
-        if "prior" in data:
-            natural_variants["prior"] = data["prior"]
+        for key in ("prior", "endpoint"):
+            if key in data:
+                natural_variants[key] = data[key]
         result["naturalness"] = naturalness_block(obs_all, target_all, natural_variants)
-    if getattr(model, "model_type", None) == "ntu2p_contact_graph_diffusion":
+    if getattr(model, "model_type", None) in ("ntu2p_contact_graph_diffusion", "ntu2p_jit_flow") or args.interaction_metrics:
         from utils.ntu2p_contact_graph import contact_metrics
+        from utils.ntu2p_interaction_timing import interaction_timing_block
 
-        contact_variants = OrderedDict(model=data["model"], prior=data["prior"], GT=target_all)
+        contact_variants = OrderedDict(model=data["model"])
+        for key in ("prior", "endpoint"):
+            if key in data:
+                contact_variants[key] = data[key]
+        timing_variants = OrderedDict(contact_variants)
+        contact_variants["GT"] = target_all
         result["contact"] = contact_metrics(obs_all, target_all, contact_variants, data["actions"].reshape(-1))
         result["contact_geometry"] = contact_geometry_metadata()
+        result["interaction_timing"] = interaction_timing_block(obs_all, timing_variants, target_all, data["actions"].reshape(-1))
+    if is_flow:
+        result["flow_readout"] = OrderedDict(
+            [("readout", args.flow_readout), ("num_samples", int(args.flow_samples)), ("nfe_steps", int(args.flow_nfe)),
+             ("solver", args.flow_solver), ("sample_seed", int(args.flow_sample_seed))]
+        )
     if args.export_arrays:
         # 与 eval/analyze_ntu2p_naturalness.py --pred_file、sample/render_ntu2p_review_sheet.py --arrays 的格式兼容。
         methods = OrderedDict((key, data[key]) for key in ("model", "base") + EXTRA_VARIANTS if key in data)
@@ -393,6 +414,13 @@ def build_arg_parser():
     parser.add_argument("--override_canonical_ab_fallback", choices=("a_facing", "camera_x"), default=None,
                         help="诊断：推理时替换规范系的双人重合回退（不改权重）")
     parser.add_argument("--export_arrays", default=None, help="保存 obs/target/methods/actions/meta 供自然度分析与审查图")
+    parser.add_argument("--interaction_metrics", action="store_true", help="对任意模型另报接触距离与交互时序指标（流模型与接触图模型总是计算）")
+    parser.add_argument("--flow_readout", choices=("endpoint", "sample", "mean", "median", "medoid"), default="endpoint",
+                        help="JiT 流模型的读出：确定性端点、单样本或 K 样本的均值/几何中位数/medoid")
+    parser.add_argument("--flow_samples", type=int, default=16)
+    parser.add_argument("--flow_nfe", type=int, default=20, help="Heun 步数（NFE = 2×步数 − 1）")
+    parser.add_argument("--flow_solver", choices=("heun", "euler"), default="heun")
+    parser.add_argument("--flow_sample_seed", type=int, default=2718)
     parser.add_argument("--allow_cpu_for_smoke_test", action="store_true", help="仅冒烟测试：允许 --device cpu")
     return parser
 

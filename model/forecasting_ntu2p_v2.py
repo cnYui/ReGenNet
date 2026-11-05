@@ -338,7 +338,7 @@ def load_ntu2p_canon_refiner_checkpoint(path, device):
 
 
 def load_ntu2p_model_checkpoint(path, device):
-    """按 checkpoint 的 model_type 分派：旧 refiner、规范系 refiner、InterMixer（A6）。"""
+    """按 checkpoint 的 model_type 分派：旧 refiner、规范系 refiner、接触图纠正器、JiT 流、InterMixer（A6）。"""
     model_type = torch.load(path, map_location="cpu").get("model_type")
     if model_type == REFINER_MODEL_TYPE:
         return load_ntu2p_residual_refiner_checkpoint(path, device)
@@ -348,6 +348,10 @@ def load_ntu2p_model_checkpoint(path, device):
         from model.forecasting_ntu2p_graphdiff import load_ntu2p_graphdiff_checkpoint
 
         return load_ntu2p_graphdiff_checkpoint(path, device)
+    if model_type == "ntu2p_jit_flow":
+        from model.forecasting_ntu2p_jitflow import load_ntu2p_jitflow_checkpoint
+
+        return load_ntu2p_jitflow_checkpoint(path, device)
     from model.forecasting_ntu2p_intermixer import load_ntu2p_intermixer_checkpoint
 
     return load_ntu2p_intermixer_checkpoint(path, device)
